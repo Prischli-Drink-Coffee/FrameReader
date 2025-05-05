@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.ipynb_checkpoints/
+
+data/
+data_cache/
+donut-finetune/
+text/
+
+rtdetr-l.pt
+yolo11n.pt
+yolo12n.pt
+
+setup.log
+
