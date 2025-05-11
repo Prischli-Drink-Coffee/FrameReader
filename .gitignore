@@ -13,6 +13,10 @@ wheels/
 data/
 data_cache/
 donut-finetune/
+detection_models/
+output_donut/
+output_trocr/
+results_donut/
 text/
 
 rtdetr-l.pt
