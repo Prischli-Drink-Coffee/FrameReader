@@ -13,8 +13,17 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from nltk import edit_distance
+import random
 
+from inference import TextCleanup, EditDistanceMetric
 from model import DonutModel
+
+try:
+    import torch_tensorrt
+    TENSORRT_AVAILABLE = True
+except ImportError:
+    TENSORRT_AVAILABLE = False
+    print("Torch-TensorRT не установлен. Для использования TensorRT установите библиотеку.")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,111 +35,74 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class TextCleanup:
-    @staticmethod
-    def cleanup_donut_output(text):
-        """Очищает выходные данные Donut от специальных токенов."""
-        text = re.sub(r"<s_([^>]*)>", "", text)
-        text = re.sub(r"</s_[^>]*>", "", text)
-        text = text.replace("<sep/>", ", ")
-        text = re.sub(r"\s+", " ", text).strip()
-        return text
-
-    @staticmethod
-    def extract_fields_from_donut_output(text):
-        """Извлекает поля из выходных данных Donut и преобразует их в словарь."""
-        output = {}
-        
-        while text:
-            start_token = re.search(r"<s_(.*?)>", text, re.IGNORECASE)
-            if start_token is None:
-                break
-            key = start_token.group(1)
-            end_token = re.search(fr"</s_{key}>", text, re.IGNORECASE)
-            start_token = start_token.group()
-            if end_token is None:
-                text = text.replace(start_token, "")
-            else:
-                end_token = end_token.group()
-                start_token_escaped = re.escape(start_token)
-                end_token_escaped = re.escape(end_token)
-                content = re.search(f"{start_token_escaped}(.*?){end_token_escaped}", text, re.IGNORECASE)
-                if content is not None:
-                    content = content.group(1).strip()
-                    if r"<s_" in content and r"</s_" in content:  # non-leaf node
-                        value = TextCleanup.extract_fields_from_donut_output(content)
-                        if value:
-                            output[key] = value
-                    else:  # leaf nodes
-                        output[key] = []
-                        for leaf in content.split(r"<sep/>"):
-                            leaf = leaf.strip()
-                            output[key].append(leaf)
-                        if len(output[key]) == 1:
-                            output[key] = output[key][0]
-
-                text = text[text.find(end_token) + len(end_token):].strip()
-
-        if not output:
-            return {"text_sequence": text.strip()}
-        return output
-
-
-class EditDistanceMetric:
-    @staticmethod
-    def calculate(prediction: str, reference: str) -> float:
-        """Вычисляет нормализованное расстояние редактирования между двумя строками."""
-        if not reference:
-            return 0.0 if not prediction else 1.0
-        
-        distance = edit_distance(prediction, reference)
-        return distance / max(len(prediction), len(reference))
-
-
-class DonutInferenceEngine:
+class TRTInferenceEngine:
     
     def __init__(
         self,
         model_path: Union[str, Path],
+        processor_path: Optional[Union[str, Path]] = None,
         device: Optional[Union[str, torch.device]] = None,
-        precision: str = "fp32",
+        image_size: Optional[tuple] = (384, 384),
         max_length: int = 64,
-        num_beams: int = 5
+        num_beams: int = 5,
+        task_start_token: str = "<s_500k>",
+        prompt_end_token: Optional[str] = "<s_prompt>"
     ):
         self.model_path = Path(model_path) if isinstance(model_path, str) else model_path
+        
+        if processor_path is None:
+            processor_path = self.model_path.parent
+        else:
+            processor_path = Path(processor_path) if isinstance(processor_path, str) else processor_path
+            
+        self.processor_path = processor_path
         self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
-        self.precision = precision
         self.max_length = max_length
         self.num_beams = num_beams
-        
-        logger.info(f"Инициализация движка инференса из {model_path}")
+        self.task_start_token = task_start_token
+        self.prompt_end_token = prompt_end_token or task_start_token
 
+        if not TENSORRT_AVAILABLE:
+            raise ImportError("Torch-TensorRT не установлен. Установите его для использования TRT моделей.")
+        
+        logger.info(f"Инициализация TRT движка инференса из {model_path}")
+        
         start_time = time.time()
-        self.model = DonutModel.from_pretrained(
-            model_path,
-            device=self.device,
-            precision=self.precision,
-            max_length=self.max_length
-        )
-        logger.info(f"Модель загружена за {time.time() - start_time:.2f} с")
-
-        # Получаем информацию о токенах модели
-        self.task_start_token = self.model.task_start_token
-        self.prompt_end_token = getattr(self.model, 'prompt_end_token', self.task_start_token)
-        self.eos_token = self.model.processor.tokenizer.eos_token
+        try:
+            self.model = torch.load(self.model_path, map_location=self.device, weights_only=False)
+            logger.info(f"TRT модель загружена за {time.time() - start_time:.2f} с")
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке модели TensorRT: {e}")
+            raise
         
-        logger.info(f"Токены модели: task_start_token='{self.task_start_token}', prompt_end_token='{self.prompt_end_token}', eos_token='{self.eos_token}'")
+        try:
+            temp_model = DonutModel.from_pretrained(
+                self.processor_path,
+                device="cpu",
+                max_length=self.max_length,
+                task_start_token=self.task_start_token,
+                prompt_end_token=self.prompt_end_token
+            )
+            self.processor = temp_model.processor
+            self.processor.image_processor.size = image_size
+            self.tokenizer = self.processor.tokenizer
 
-        self.model.eval()
-        logger.info(f"Модель инициализирована на устройстве {self.device}, точность: {self.precision}")
+            self.eos_token = self.tokenizer.eos_token
+            self.eos_token_id = self.tokenizer.eos_token_id
+            self.pad_token_id = self.tokenizer.pad_token_id
+            
+            logger.info(f"Процессор загружен из {self.processor_path}")
+
+            del temp_model
+            torch.cuda.empty_cache() if torch.cuda.is_available() else None
+            
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке процессора: {e}")
+            raise
+        
+        logger.info(f"TRT движок инициализирован на устройстве {self.device}")
     
     def prepare_prompt(self, prompt: Optional[str] = None) -> str:
-        """
-        Подготавливает правильный промпт для модели.
-        
-        Если prompt не указан, возвращает только токен начала задачи.
-        Если prompt указан, возвращает токен начала задачи + промпт + токен конца промпта.
-        """
         if prompt is None or prompt.strip() == "":
             return self.task_start_token
         else:
@@ -139,6 +111,7 @@ class DonutInferenceEngine:
     def process_image(
         self, 
         image: Union[str, Path, Image.Image],
+        max_length: int = 64,
         prompt: Optional[str] = None,
         return_json: bool = True,
         save_path: Optional[Union[str, Path]] = None
@@ -150,59 +123,67 @@ class DonutInferenceEngine:
                 raise FileNotFoundError(f"Изображение не найдено: {image_path}")
             image = Image.open(image_path).convert("RGB")
 
-        processor = self.model.processor
-        
-        pixel_values = processor(image, return_tensors="pt").pixel_values
+        pixel_values = self.processor(image, return_tensors="pt").pixel_values
         pixel_values = pixel_values.to(self.device)
-        
-        # Формируем правильный промпт для модели
+
         input_prompt = self.prepare_prompt(prompt)
-        
-        decoder_input_ids = processor.tokenizer(
+        decoder_input_ids = self.tokenizer(
             input_prompt,
             add_special_tokens=False,
             return_tensors="pt"
         )["input_ids"].to(self.device)
+        
+        padded_input_ids = torch.full(
+            (decoder_input_ids.size(0), max_length),
+            self.tokenizer.pad_token_id,
+            dtype=torch.long,
+            device=self.device
+        )
+        
+        seq_length = min(decoder_input_ids.size(1), max_length)
+        padded_input_ids[:, :seq_length] = decoder_input_ids[:, :seq_length]
 
+        start_time = time.time()
         with torch.no_grad():
-            if self.precision in ["fp16", "bf16"]:
-                dtype = torch.float16 if self.precision == "fp16" else torch.bfloat16
-                with torch.autocast(device_type=self.device.type, dtype=dtype):
-                    outputs = self.model.generate(
-                        pixel_values,
-                        decoder_input_ids=decoder_input_ids,
-                        num_beams=self.num_beams,
-                        max_length=self.max_length,
-                        return_json=return_json
-                    )
-            else:
-                outputs = self.model.generate(
-                    pixel_values,
-                    decoder_input_ids=decoder_input_ids,
-                    num_beams=self.num_beams,
-                    max_length=self.max_length,
-                    return_json=return_json
-                )
+                outputs = self.model(pixel_values, padded_input_ids)
+                
+                if isinstance(outputs, dict):
+                    if 'logits' in outputs:
+                        logits = outputs['logits']
+                    elif 'last_hidden_state' in outputs:
+                        logits = outputs['last_hidden_state']
+                    else:
+                        for key, value in outputs.items():
+                            if isinstance(value, torch.Tensor):
+                                logits = value
+                                break
+                        else:
+                            raise ValueError(f"Не удалось найти тензор в выходных данных модели: {outputs.keys()}")
+                else:
+                    logits = outputs
+                
+                generated_sequence = decoder_input_ids[0].cpu().tolist()
+                for i in range(seq_length, max_length):
+                    pos_logits = logits[0, i-1, :]
+                    next_token_id = torch.argmax(pos_logits).item()
+                    generated_sequence.append(next_token_id)
+                    if next_token_id == self.eos_token_id:
+                        break
         
-        # Если модель уже вернула JSON, просто используем его
+        inference_time = time.time() - start_time
+        logger.debug(f"Время инференса: {inference_time:.4f} с")
+        decoded_output = self.tokenizer.decode(generated_sequence, skip_special_tokens=True)
+        
         result = None
-        if return_json and isinstance(outputs, list) and isinstance(outputs[0], dict):
-            result = outputs[0]
-        # Иначе, преобразуем строковый вывод в JSON
-        elif isinstance(outputs, list):
-            text_output = outputs[0]
-            if return_json:
-                try:
-                    result = TextCleanup.extract_fields_from_donut_output(text_output)
-                except Exception as e:
-                    logger.warning(f"Ошибка при преобразовании вывода в JSON: {e}")
-                    result = {"text_sequence": TextCleanup.cleanup_donut_output(text_output)}
-            else:
-                result = TextCleanup.cleanup_donut_output(text_output)
+        if return_json:
+            try:
+                result = TextCleanup.extract_fields_from_donut_output(decoded_output)
+            except Exception as e:
+                logger.warning(f"Ошибка при преобразовании вывода в JSON: {e}")
+                result = {"text_sequence": TextCleanup.cleanup_donut_output(decoded_output)}
         else:
-            result = outputs
-        
-        # Сохраняем результат, если указан путь
+            result = TextCleanup.cleanup_donut_output(decoded_output)
+
         if save_path:
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -213,7 +194,7 @@ class DonutInferenceEngine:
                 else:
                     f.write(result)
             
-            # logger.info(f"Результат сохранен в {save_path}")
+            logger.debug(f"Результат сохранен в {save_path}")
         
         return result
     
@@ -221,12 +202,13 @@ class DonutInferenceEngine:
         self, 
         image_paths: List[Union[str, Path]],
         prompt: Optional[str] = None,
-        batch_size: int = 4,
+        batch_size: int = 1,
+        max_length: int = 64,
         save_results: bool = False,
         output_dir: Optional[Union[str, Path]] = None,
         return_json: bool = True
     ) -> List[Dict[str, Any]]:
-
+ 
         results = []
 
         if save_results and output_dir:
@@ -247,6 +229,7 @@ class DonutInferenceEngine:
                     result = self.process_image(
                         image_path, 
                         prompt=prompt, 
+                        max_length=max_length,
                         return_json=return_json,
                         save_path=save_path
                     )
@@ -267,12 +250,77 @@ class DonutInferenceEngine:
         
         return results
     
+    def visualize_prediction(
+        self,
+        image: Union[str, Path, Image.Image],
+        prompt: Optional[str] = None,
+        save_path: Optional[Union[str, Path]] = None,
+        output_dir: Optional[Union[str, Path]] = None,
+        return_json: bool = True
+    ) -> None:
+
+        if isinstance(image, (str, Path)):
+            image_path = Path(image)
+            if not image_path.exists():
+                raise FileNotFoundError(f"Изображение не найдено: {image_path}")
+            pil_image = Image.open(image_path).convert("RGB")
+        else:
+            pil_image = image
+
+        if save_path is None and output_dir is not None and isinstance(image, (str, Path)):
+            output_dir = Path(output_dir)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            image_name = Path(image).stem
+            save_path = output_dir / f"{image_name}_visualized.png"
+
+        result = self.process_image(pil_image, prompt=prompt, return_json=return_json)
+
+        fig, ax = plt.subplots(1, 1, figsize=(12, 12))
+
+        ax.imshow(pil_image)
+        ax.axis('off')
+
+        if isinstance(result, str):
+            text_result = result
+        elif isinstance(result, dict):
+            text_result = json.dumps(result, ensure_ascii=False, indent=2)
+        else:
+            text_result = str(result)
+
+        if isinstance(result, dict):
+            clean_result = text_result
+        else:
+            clean_result = TextCleanup.cleanup_donut_output(text_result)
+        
+        plt.figtext(0.5, 0.01, clean_result, wrap=True, horizontalalignment='center', fontsize=12)
+        
+        plt.tight_layout()
+
+        if save_path:
+            save_path = Path(save_path)
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(save_path, bbox_inches='tight')
+            
+            # Сохраняем также JSON результат
+            if output_dir is not None:
+                json_path = output_dir / f"{save_path.stem.replace('_visualized', '')}_result.json"
+                with open(json_path, "w", encoding="utf-8") as f:
+                    if isinstance(result, dict):
+                        json.dump(result, f, ensure_ascii=False, indent=2)
+                    else:
+                        f.write(result)
+        else:
+            plt.show()
+        
+        plt.close()
+    
     def evaluate_on_dataset(
         self,
         dataset_path: Union[str, Path],
         ground_truth_file: Optional[Union[str, Path]] = None,
         prompt: Optional[str] = None,
-        batch_size: int = 4,
+        batch_size: int = 1,
+        max_length: int = 64,
         save_results: bool = False,
         output_dir: Optional[Union[str, Path]] = None,
         return_json: bool = True
@@ -291,13 +339,12 @@ class DonutInferenceEngine:
         image_paths = []
         for ext in ["*.png", "*.jpg", "*.jpeg"]:
             image_paths.extend(list(dataset_path.glob(ext)))
-        
-        logger.info(f"Найдено {len(image_paths)} изображений для оценки")
-
+    
         results = self.process_batch(
             image_paths,
             prompt=prompt,
             batch_size=batch_size,
+            max_length=max_length,
             save_results=save_results,
             output_dir=output_dir,
             return_json=return_json
@@ -334,7 +381,6 @@ class DonutInferenceEngine:
                 
                 logger.info(f"Среднее расстояние редактирования: {avg_edit_distance:.4f}")
         
-        # Сохраняем метрики, если указана директория
         if save_results and output_dir:
             metrics_path = Path(output_dir) / "evaluation_metrics.json"
             with open(metrics_path, "w", encoding="utf-8") as f:
@@ -343,81 +389,15 @@ class DonutInferenceEngine:
             logger.info(f"Метрики сохранены в {metrics_path}")
         
         return metrics
-    
-    def visualize_prediction(
-        self,
-        image: Union[str, Path, Image.Image],
-        prompt: Optional[str] = None,
-        save_path: Optional[Union[str, Path]] = None,
-        output_dir: Optional[Union[str, Path]] = None,
-        return_json: bool = True
-    ) -> None:
-
-        if isinstance(image, (str, Path)):
-            image_path = Path(image)
-            if not image_path.exists():
-                raise FileNotFoundError(f"Изображение не найдено: {image_path}")
-            pil_image = Image.open(image_path).convert("RGB")
-        else:
-            pil_image = image
-
-        # Если путь для сохранения не указан, но указана директория, формируем путь
-        if save_path is None and output_dir is not None and isinstance(image, (str, Path)):
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-            image_name = Path(image).stem
-            save_path = output_dir / f"{image_name}_visualized.png"
-
-        # Обрабатываем результат, но не сохраняем JSON (он будет сохранен отдельно)
-        result = self.process_image(pil_image, prompt=prompt, return_json=return_json)
-
-        fig, ax = plt.subplots(1, 1, figsize=(12, 12))
-
-        ax.imshow(pil_image)
-        ax.axis('off')
-
-        if isinstance(result, str):
-            text_result = result
-        elif isinstance(result, dict):
-            text_result = json.dumps(result, ensure_ascii=False, indent=2)
-        else:
-            text_result = str(result)
-
-        if isinstance(result, dict):
-            clean_result = text_result
-        else:
-            clean_result = TextCleanup.cleanup_donut_output(text_result)
-        
-        plt.figtext(0.5, 0.01, clean_result, wrap=True, horizontalalignment='center', fontsize=12)
-        
-        plt.tight_layout()
-
-        if save_path:
-            save_path = Path(save_path)
-            save_path.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(save_path, bbox_inches='tight')
-            # logger.info(f"Визуализация сохранена в {save_path}")
-            
-            # Сохраняем также JSON результат
-            if output_dir is not None:
-                json_path = output_dir / f"{save_path.stem.replace('_visualized', '')}_result.json"
-                with open(json_path, "w", encoding="utf-8") as f:
-                    if isinstance(result, dict):
-                        json.dump(result, f, ensure_ascii=False, indent=2)
-                    else:
-                        f.write(result)
-                # logger.info(f"Результат сохранен в {json_path}")
-        else:
-            plt.show()
-        
-        plt.close()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Donut Inference Engine")
+    parser = argparse.ArgumentParser(description="Donut TensorRT Inference Engine")
     
     parser.add_argument("--model_path", type=str, required=True,
-                        help="Путь к модели или имя модели на Hugging Face Hub")
+                        help="Путь к модели TensorRT (.pt файл)")
+    parser.add_argument("--processor_path", type=str, default=None,
+                        help="Путь к оригинальной модели Donut или директории с процессором")
     parser.add_argument("--image_path", type=str, default=None,
                         help="Путь к изображению для обработки")
     parser.add_argument("--dataset_path", type=str, default=None,
@@ -428,9 +408,6 @@ def main():
                         help="Директория для сохранения результатов")
     parser.add_argument("--device", type=str, default=None,
                         help="Устройство для вычислений ('cpu' или 'cuda')")
-    parser.add_argument("--precision", type=str, default="bf16",
-                        choices=["fp32", "fp16", "bf16"],
-                        help="Точность вычислений")
     parser.add_argument("--max_length", type=int, default=64,
                         help="Максимальная длина генерируемой последовательности")
     parser.add_argument("--num_beams", type=int, default=5,
@@ -445,22 +422,34 @@ def main():
                         help="Сохранять результаты в файлы")
     parser.add_argument("--no_json", action="store_true",
                         help="Не преобразовывать вывод в JSON")
+    parser.add_argument("--task_start_token", type=str, default="<s_500k>",
+                        help="Токен начала задачи")
+    parser.add_argument("--prompt_end_token", type=str, default="<s_prompt>",
+                        help="Токен конца промпта")
+    parser.add_argument("--max_images", type=int, default=100,
+                        help="Максимальное количество изображений для обработки (ограничивает выборку)")
     
     args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if not args.output_dir and args.save_results:
+        args.output_dir = "./output_trt"
+    
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
 
-    engine = DonutInferenceEngine(
+    engine = TRTInferenceEngine(
         model_path=args.model_path,
+        processor_path=args.processor_path,
         device=args.device,
-        precision=args.precision,
         max_length=args.max_length,
-        num_beams=args.num_beams
+        num_beams=args.num_beams,
+        task_start_token=args.task_start_token,
+        prompt_end_token=args.prompt_end_token
     )
     
     return_json = not args.no_json
-    
+
     if args.image_path:
         if args.visualize:
             engine.visualize_prediction(
@@ -476,7 +465,8 @@ def main():
             
             result = engine.process_image(
                 args.image_path, 
-                prompt=args.prompt, 
+                prompt=args.prompt,
+                max_length=args.max_length,
                 return_json=return_json,
                 save_path=save_path
             )
@@ -491,9 +481,15 @@ def main():
         image_paths = []
         for ext in ["*.png", "*.jpg", "*.jpeg"]:
             image_paths.extend(list(Path(args.dataset_path).glob(ext)))
+        
+        if args.max_images is not None and args.max_images > 0:
+            logger.info(f"Ограничиваем выборку до {args.max_images} изображений (из {len(image_paths)} найденных)")
+            random.shuffle(image_paths)
+            image_paths = image_paths[:args.max_images]
+        
+        logger.info(f"Будет обработано {len(image_paths)} изображений")
             
         if args.visualize:
-            # Добавляем обработку визуализации для всех изображений в датасете
             for image_path in tqdm(image_paths, desc="Визуализация изображений"):
                 try:
                     save_path = output_dir / f"{Path(image_path).stem}_visualized.png" if args.save_results else None
@@ -517,6 +513,7 @@ def main():
                 ground_truth_file=args.ground_truth,
                 prompt=args.prompt,
                 batch_size=args.batch_size,
+                max_length=args.max_length,
                 save_results=args.save_results,
                 output_dir=output_dir,
                 return_json=return_json
@@ -529,6 +526,7 @@ def main():
                 image_paths=image_paths,
                 prompt=args.prompt,
                 batch_size=args.batch_size,
+                max_length=args.max_length,
                 save_results=args.save_results,
                 output_dir=output_dir,
                 return_json=return_json

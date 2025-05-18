@@ -26,3 +26,5 @@ yolo12n.pt
 setup.log
 
 ocr_models/
+TensorRT-Model-Optimizer/
+optimized_donut_output/
