@@ -1,0 +1,8 @@
+version: '3'
+services:
+  tritonserver:
+    image: tritonserver:r24.08-ocr
+    command: tritonserver --model-repository=/workspace/models
+    volumes:
+      - ./:/workspace
+    gpus: all

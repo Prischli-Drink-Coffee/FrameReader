@@ -1,0 +1,44 @@
+backend: "donut"
+max_batch_size: 1
+
+dynamic_batching {
+ max_queue_delay_microseconds: 100000
+}
+
+input [
+  {
+    name: "image"
+    data_type: TYPE_UINT8
+    dims: [-1, -1, -1]
+  }
+]
+output [
+  {
+    name: "text_sequence"
+    data_type: TYPE_STRING
+    dims: [1]
+  }
+]
+
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [0]
+  }
+]
+
+parameters[
+{
+  key: "image_height"
+  value: {
+    string_value: "512"
+  }
+},
+{
+  key: "image_width"
+  value: {
+    string_value: "512"
+  }
+}
+]

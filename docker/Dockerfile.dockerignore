@@ -1,0 +1,7 @@
+**/*.onnx
+**/*.plan
+**/*.cache/*
+**/*onnx*
+**/*engine*
+**/*pytorch_model*
+**/*.pth*

@@ -1,0 +1,15 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.cache
+
+models/donut/1/pytorch-batch-size-1
+models/yolo/1/engine-batch-size-16
+backend/python
