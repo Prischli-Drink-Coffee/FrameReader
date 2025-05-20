@@ -10,6 +10,19 @@ import torchvision
 import cv2
 from cuda import cudart
 from PIL import Image
+import logging
+
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 file_location = os.path.dirname(os.path.realpath(__file__))
 

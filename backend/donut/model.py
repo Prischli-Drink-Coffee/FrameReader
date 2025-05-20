@@ -11,6 +11,18 @@ import re
 from PIL import Image
 from cuda import cudart
 
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
 file_location = os.path.dirname(os.path.realpath(__file__))
 
 sys.path.insert(0, os.path.join(file_location))
@@ -68,7 +80,7 @@ class TritonPythonModel:
         self._model_instance_device_id = int(args["model_instance_device_id"])
         
         try:
-            from model import TRTInferenceEngine
+            from engine import TRTInferenceEngine
             
             model_directory = os.path.join(args["model_repository"], args["model_version"])
             model_path = os.path.join(model_directory, "donut_fp16.pt")
@@ -100,8 +112,7 @@ class TritonPythonModel:
                 image=dummy_pil_image,
                 max_length=self._max_length,
                 prompt=self._prompt,
-                return_json=True,
-                save_path=None
+                return_json=True
             )
             
             self._logger = pb_utils.Logger

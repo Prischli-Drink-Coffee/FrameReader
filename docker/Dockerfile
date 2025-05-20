@@ -3,6 +3,28 @@ ARG BASE_IMAGE_TAG=24.01-py3
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS tritonserver-frame-reader
 
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgl1-mesa-glx \
+        libglib2.0-0 \
+        libgomp1 \
+        locales \
+        lsof \
+        psmisc \
+        curl && \
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - && \
+    apt-get install -y nodejs && \
+    npm install -g pm2 && \
+    locale-gen en_US.UTF-8 && \
+    apt-get purge -y curl && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8
+ENV LANGUAGE=en_US:en
+ENV LC_ALL=en_US.UTF-8
+
 RUN pip install uv
 
 RUN uv venv /opt/.venv
@@ -17,6 +39,8 @@ RUN git clone https://github.com/NVIDIA/TensorRT.git -b release/10.4 --single-br
 RUN uv pip install -r /workspace/pyproject.toml
 
 RUN uv pip install tritonclient[all]
+
+RUN uv pip install "nvidia-modelopt[all]"
 
 RUN mkdir -p /opt/tritonserver/backends/python
 RUN mkdir -p /opt/tritonserver/backends/donut

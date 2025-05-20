@@ -23,6 +23,9 @@ import torch
 from PIL import Image
 from tqdm.auto import tqdm
 
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -41,9 +44,9 @@ class DonutModel:
         processor: DonutProcessor,
         device: Optional[Union[str, torch.device]] = None,
         precision: str = "fp32",
-        max_length: int = 768,
-        task_start_token: str = "<s>",
-        prompt_end_token: Optional[str] = None,
+        max_length: int = 64,
+        task_start_token: str = "<s_500k>",
+        prompt_end_token: Optional[str] = "<s_prompt>",
     ):
         self.model = model
         self.processor = processor
@@ -129,10 +132,10 @@ class DonutModel:
         model_name_or_path: str,
         device: Optional[Union[str, torch.device]] = None,
         precision: str = "fp32",
-        max_length: int = 768,
-        image_size: Tuple[int, int] = (1280, 960),
-        task_start_token: str = "<s>",
-        prompt_end_token: Optional[str] = None,
+        max_length: int = 64,
+        image_size: Tuple[int, int] = (384, 384),
+        task_start_token: str = "<s_500k>",
+        prompt_end_token: Optional[str] = "<s_prompt>",
         revision: Optional[str] = None,
         **kwargs
     ) -> "DonutModel":
@@ -392,7 +395,7 @@ class DonutModel:
         pixel_values: torch.Tensor,
         prompt: Optional[str] = None,
         decoder_input_ids: Optional[torch.Tensor] = None,
-        num_beams: int = 3,
+        num_beams: int = 5,
         max_length: Optional[int] = None,
         return_json: bool = False,
         **kwargs
@@ -455,9 +458,6 @@ class DonutModel:
         return decoded_sequences if not kwargs.get("return_tensors", False) else outputs.sequences
 
     def token2json(self, tokens, is_inner_value=False):
-        """
-        Convert a (generated) token sequence into an ordered JSON format
-        """
         output = dict()
 
         while tokens:
