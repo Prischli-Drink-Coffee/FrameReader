@@ -10,6 +10,7 @@ wheels/
 .venv
 .cache
 
-models/donut/1/pytorch-batch-size-1
-models/yolo/1/engine-batch-size-16
-backend/python
+/models/donut/1/checkpoint
+/models/donut/1/donut_fp16.pt
+/models/yolo/1/yolo_int8.engine
+/backend/python

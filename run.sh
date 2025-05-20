@@ -97,15 +97,36 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-if nvidia-smi &> /dev/null; then
-    echo "NVIDIA GPU обнаружен. Запуск с поддержкой GPU."
-    GPU_FLAG="--gpus all"
-else
-    echo "ВНИМАНИЕ: NVIDIA GPU не обнаружен. Запуск без поддержки GPU."
-    GPU_FLAG=""
+if command -v pm2 >/dev/null 2>&1; then
+    echo "Остановка всех PM2 процессов..."
+    pm2 stop all || true
+    pm2 delete all || true
 fi
 
-$RUN_PREFIX docker run $GPU_FLAG -it --rm \
+echo "Очистка временных директорий..."
+sudo rm -rf /tmp/ray
+sudo rm -rf /tmp/rayserve-demo
+sudo mkdir -p /tmp/rayserve-demo
+
+ip_address=$(hostname -I | awk '{print $1}')
+echo "IP адрес: $ip_address"
+
+echo "Запуск TritonServer с Ray Serve..."
+
+if command -v lsof >/dev/null 2>&1; then
+    if lsof -Pi :6666 -sTCP:LISTEN -t >/dev/null ; then
+        echo "Порт 6666 занят. Остановка процессов..."
+        ray stop || true
+        lsof -t -i:6666 | xargs -r kill -9
+        echo "Порт 6666 освобожден."
+    fi
+else
+    echo "Команда lsof не найдена. Устанавливаем..."
+    apt-get update && apt-get install -y lsof
+fi
+
+$RUN_PREFIX docker run --gpus all -d \
+    --name tritonserver \
     --network host \
     --shm-size=10G \
     --ulimit memlock=-1 \
@@ -116,6 +137,13 @@ $RUN_PREFIX docker run $GPU_FLAG -it --rm \
     -v ${SOURCE_DIR}:/workspace \
     -v${SOURCE_DIR}/.cache/huggingface:/root/.cache/huggingface \
     -v${SOURCE_DIR}/backend:/opt/tritonserver/backends/ \
-    -w /workspace $IMAGE /bin/bash
+    -w /workspace $IMAGE /bin/bash -c "
+    source /opt/.venv/bin/activate &&
+    cd /workspace &&
+    pm2 start 'serve run tritonserver_deployment:deployment' --name triton && # Ensure Serve listens on all interfaces
+    echo 'Сервисы запущены. Используйте команду \"pm2 logs\" для просмотра логов.' &&
+    echo 'Для подключения к контейнеру используйте \"docker exec -it tritonserver /bin/bash\".' &&
+    tail -f /dev/null
+    "
 
 { set +x; } 2>/dev/null
