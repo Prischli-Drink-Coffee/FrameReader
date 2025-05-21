@@ -140,7 +140,9 @@ $RUN_PREFIX docker run --gpus all -d \
     -w /workspace $IMAGE /bin/bash -c "
     source /opt/.venv/bin/activate &&
     cd /workspace &&
-    pm2 start 'serve run tritonserver_deployment:deployment' --name triton && # Ensure Serve listens on all interfaces
+    pm2 start 'tritonserver --model-repository models --http-port=8080 --metrics-port=8002 --allow-http=true --log-verbose=0' --name triton --output ./logs/triton_out.log --error ./logs/triton_err.log &&
+    sleep 15 &&
+    pm2 start 'PYTHONUNBUFFERED=1 serve run tritonserver_deployment:deployment' --name deploy --output ./logs/deploy_out.log --error ./logs/deploy_err.log &&
     echo 'Сервисы запущены. Используйте команду \"pm2 logs\" для просмотра логов.' &&
     echo 'Для подключения к контейнеру используйте \"docker exec -it tritonserver /bin/bash\".' &&
     tail -f /dev/null

@@ -722,6 +722,8 @@ class TRTInferenceEngine:
         else:
             result = TextCleanup.cleanup_donut_output(decoded_output)
         
+        logger.info(result)
+
         return result
     
     def process_batch(

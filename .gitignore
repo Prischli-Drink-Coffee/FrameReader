@@ -14,3 +14,4 @@ wheels/
 /models/donut/1/donut_fp16.pt
 /models/yolo/1/yolo_int8.engine
 /backend/python
+/logs

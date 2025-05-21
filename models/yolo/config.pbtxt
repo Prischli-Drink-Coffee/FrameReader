@@ -9,7 +9,7 @@ input [
   {
     name: "image"
     data_type: TYPE_UINT8
-    dims: [ -1, -1, -1]
+    dims: [640, 640, 3]
   }
 ]
 output [
@@ -32,13 +32,13 @@ parameters[
 {
   key: "image_height"
   value: {
-    string_value: "512"
+    string_value: "640"
   }
 },
 {
   key: "image_width"
   value: {
-    string_value: "512"
+    string_value: "640"
   }
 }
 ]

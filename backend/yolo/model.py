@@ -11,6 +11,8 @@ import cv2
 from cuda import cudart
 from PIL import Image
 import logging
+from ultralytics.engine.results import Results
+from ultralytics import YOLO
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -35,8 +37,8 @@ import triton_python_backend_utils as pb_utils
 class TritonPythonModel:
     def _set_defaults(self):
         self._batch_size = 16
-        self._image_height = 512
-        self._image_width = 512
+        self._image_height = 640
+        self._image_width = 640
 
     def _set_from_parameter(self, parameter, parameters, class_):
         value = parameters.get(parameter, None)
@@ -68,7 +70,6 @@ class TritonPythonModel:
         self._model_instance_device_id = int(args["model_instance_device_id"])
         
         try:
-            from ultralytics import YOLO
             model_directory = os.path.join(args["model_repository"], args["model_version"])
             model_path = os.path.join(model_directory, "yolo_int8.engine")
     
@@ -82,9 +83,8 @@ class TritonPythonModel:
             else:
                 self._device = torch.device("cpu")
                 
-            self._use_tracker = False
             dummy_image = np.zeros((self._image_height, self._image_width, 3), dtype=np.uint8)
-            self._model(dummy_image)
+            self._model.predict(dummy_image)
             
             self._logger = pb_utils.Logger
             self._logger.log_info("YOLO model initialized successfully")
@@ -99,41 +99,44 @@ class TritonPythonModel:
         for request in requests:
             try:
                 image_tensor = pb_utils.get_input_tensor_by_name(request, "image")
-                
-                if image_tensor is None:
-                    error_message = "Input 'image' is missing"
+                image_data = input_tensor.as_numpy()
+                image_tensor = torch.from_numpy(
+                    np.transpose(image_data.astype(np.float32) / 255.0, (0, 3, 1, 2))
+                ).to(self._device)
+                    
+                try:                    
+                    batch_results = self._model.predict(
+                        source=image_tensor,
+                        conf=0.2,
+                        iou=0.2,
+                        imgsz=(self._image_height, self._image_width),
+                        device=self._device,
+                        verbose=False,
+                        augment=False
+                    )
+                    logger.warning(batch_results)
+                    
+                    result_json = json.dumps(batch_results)
+                    logger.info(f"Output result_json: {result_json}")
+                    result_array = np.array([result_json], dtype=np.object_)
+                    logger.info(f"Output result_array: {result_array}, shape: {result_array.shape}, dtype: {result_array.dtype}")
+                    result_tensor = pb_utils.Tensor(
+                        "result",
+                        result_array
+                    )
+                    logger.info(f"Output result_tensor: {result_tensor}")
+                    inference_response = pb_utils.InferenceResponse(
+                        output_tensors=[result_tensor]
+                    )
+                    responses.append(inference_response)
+
+                except Exception as inference_error:
+                    error_message = f"Error during batch YOLO inference: {str(inference_error)}"
+                    self._logger.log_error(error_message)
                     responses.append(self._create_error_response(error_message))
-                    continue
-                
-                image_data = image_tensor.as_numpy()
-                
-                batch_results = []
-                for img in image_data:
-                    detection_results = self._model(img)
                     
-                    result_dict = {}
-                    for i, result in enumerate(detection_results):
-                        boxes = result.boxes
-                        if len(boxes) > 0:
-                            result_dict["boxes"] = boxes.xyxy.cpu().numpy().tolist()
-                            result_dict["confidence"] = boxes.conf.cpu().numpy().tolist()
-                            result_dict["classes"] = boxes.cls.cpu().numpy().tolist()
-                            result_dict["class_names"] = [
-                                result.names[int(cls_id)] for cls_id in boxes.cls.cpu().numpy()
-                            ]
-                    
-                    batch_results.append(result_dict)
-                
-                result_json = json.dumps(batch_results)
-                result_tensor = pb_utils.Tensor("result", np.array([result_json], dtype=np.object_))
-                
-                inference_response = pb_utils.InferenceResponse(
-                    output_tensors=[result_tensor]
-                )
-                responses.append(inference_response)
-                
-            except Exception as e:
-                error_message = f"Error processing request: {str(e)}"
+            except Exception as request_error:
+                error_message = f"Error processing request: {str(request_error)}"
                 responses.append(self._create_error_response(error_message))
                 
         return responses
