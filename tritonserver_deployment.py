@@ -1,7 +1,5 @@
 import os
-from pprint import pprint
-from typing import Optional, Dict, List
-import base64
+from typing import Optional, Dict, List, Any
 import io
 import sys
 import numpy as np
@@ -12,11 +10,16 @@ from tritonclient.utils import np_to_triton_dtype
 from PIL import Image
 from ray import serve
 import logging
+import json
+from pathlib import Path
+from logging.handlers import RotatingFileHandler
 
-from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile, status, Form, Query
+from fastapi import FastAPI, HTTPException, File, UploadFile, status
 from fastapi.openapi.models import Tag as OpenApiTag
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, FileResponse
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
+from starlette.requests import Request
 
 sys.stdout.reconfigure(encoding='utf-8')
 sys.stderr.reconfigure(encoding='utf-8')
@@ -24,15 +27,286 @@ sys.stderr.reconfigure(encoding='utf-8')
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger(__name__)
 
 
-app = FastAPI(title="OCR API", version="1.3.2",
-              description="This API triton server is intended for the FrameReader project. For rights, contact the service owner (dfvolkhin@edu.hse.ru).")
+class AppConfig:
+    TRITON_URL = "localhost:8080"
+    YOLO_BATCH_SIZE = 16
+    YOLO_IMAGE_SIZE = (640, 640)
+    DONUT_BATCH_SIZE = 1
+    DONUT_IMAGE_SIZE = (384, 384)
+
+
+class ImageProcessor:
+    @staticmethod
+    def resize_image(image: Image.Image, target_size: tuple) -> np.ndarray:
+        resized = image.resize(target_size)
+        return np.array(resized, dtype=np.uint8)
+    
+    @staticmethod
+    def create_padding_image(size: tuple) -> np.ndarray:
+        return np.zeros((*size, 3), dtype=np.uint8)
+    
+    @classmethod
+    def create_batches(cls, images: List[np.ndarray], batch_size: int, image_size: tuple) -> List[np.ndarray]:
+        batches = []
+        padding_image = cls.create_padding_image(image_size)
+        
+        for i in range(0, len(images), batch_size):
+            batch = images[i:i + batch_size]
+            padding_needed = batch_size - len(batch)
+            
+            if padding_needed > 0:
+                batch.extend([padding_image] * padding_needed)
+            
+            batches.append(np.stack(batch))
+        
+        return batches
+
+
+class TritonResponseExtractor:
+    @staticmethod
+    def extract_string_result(response, output_name: str) -> str:
+        try:
+
+            raw_data = response.as_numpy(output_name)
+            
+            if raw_data.size == 0:
+                raise ValueError("Empty response from Triton")
+            
+            result_item = raw_data.flatten()[0]
+            
+            if isinstance(result_item, (bytes, np.bytes_)):
+                decoded = result_item.decode('utf-8')
+            elif hasattr(result_item, 'decode'):
+                decoded = result_item.decode('utf-8')
+            else:
+                decoded = str(result_item)
+            
+            decoded = decoded.strip()
+            if not decoded:
+                raise ValueError("Empty decoded response")
+                
+            return decoded
+                
+        except (UnicodeDecodeError, AttributeError) as e:
+            raise ValueError(f"Cannot decode response from {output_name}: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to extract result from {output_name}: {e}")
+
+
+class BaseInferenceService:
+    def __init__(self, triton_client: http_client.InferenceServerClient, model_name: str):
+        self._client = triton_client
+        self._model_name = model_name
+        self._extractor = TritonResponseExtractor()
+
+    def _get_model_outputs(self) -> List[str]:
+        try:
+            metadata = self._client.get_model_metadata(model_name=self._model_name)
+            return [output['name'] for output in metadata['outputs']]
+        except Exception as e:
+            logger.error(f"Failed to get model metadata for {self._model_name}: {e}")
+            return []
+
+    def _create_input_tensor(self, batch_data: np.ndarray, input_name: str = "image"):
+        input_tensor = http_client.InferInput(
+            input_name,
+            batch_data.shape,
+            np_to_triton_dtype(batch_data.dtype)
+        )
+        input_tensor.set_data_from_numpy(batch_data)
+        return input_tensor
+
+    def _infer_single_batch(self, batch_data: np.ndarray) -> Dict[str, Any]:
+        try:
+            logger.info(f"Starting inference for batch shape: {batch_data.shape}")
+            
+            input_tensor = self._create_input_tensor(batch_data)
+            output_names = self._get_model_outputs()
+            
+            if not output_names:
+                return {"status": "error", "error": f"Model {self._model_name} has no outputs defined"}
+            
+            output_tensors = [http_client.InferRequestedOutput(name) for name in output_names]
+            
+            response = self._client.infer(
+                model_name=self._model_name,
+                inputs=[input_tensor],
+                outputs=output_tensors
+            )
+
+            result = response.get_response()
+            logger.info(f"response.get_response(): {result}")
+
+            result_str = self._extractor.extract_string_result(response, output_names[0])
+            logger.info(f"Raw response from {self._model_name}: {result_str[:200]}...")
+            
+            if not result_str.strip():
+                return {"status": "error", "error": "Empty response from model"}
+            
+            try:
+                parsed_result = json.loads(result_str)
+                logger.info(f"Successfully parsed JSON with {len(parsed_result)} items")
+                return {"status": "success", "result": parsed_result}
+                
+            except json.JSONDecodeError as json_err:
+                logger.error(f"JSON parsing failed for {self._model_name}. Error: {json_err}")
+                logger.error(f"Raw result (first 500 chars): {result_str[:500]}")
+                return {"status": "error", "error": f"Invalid JSON response: {json_err}"}
+            
+        except Exception as e:
+            logger.error(f"Inference error for {self._model_name}: {e}", exc_info=True)
+            return {"status": "error", "error": str(e)}
+
+
+class YOLOInferenceService(BaseInferenceService):
+    def __init__(self, triton_client: http_client.InferenceServerClient):
+        super().__init__(triton_client, "yolo")
+
+    def process_image_batches(self, batches: List[np.ndarray], actual_count: int) -> List[Dict[str, Any]]:
+        all_results = []
+        
+        for batch_idx, batch_data in enumerate(batches):
+            logger.info(f"Processing YOLO batch {batch_idx + 1}/{len(batches)}")
+            
+            result = self._infer_single_batch(batch_data)
+            
+            if result["status"] == "success":
+                batch_start = batch_idx * AppConfig.YOLO_BATCH_SIZE
+                batch_end = min(batch_start + AppConfig.YOLO_BATCH_SIZE, actual_count)
+                batch_size = batch_end - batch_start
+                
+                batch_results = result["result"]
+                if not isinstance(batch_results, list):
+                    logger.warning(f"Expected list result, got {type(batch_results)}")
+                    batch_results = [batch_results]
+                
+                valid_results = batch_results[:batch_size]
+                all_results.extend(valid_results)
+                
+                logger.info(f"Successfully processed {len(valid_results)} images in batch {batch_idx + 1}")
+            else:
+                logger.error(f"Batch {batch_idx + 1} failed: {result}")
+                batch_start = batch_idx * AppConfig.YOLO_BATCH_SIZE
+                batch_end = min(batch_start + AppConfig.YOLO_BATCH_SIZE, actual_count)
+                batch_size = batch_end - batch_start
+                
+                for _ in range(batch_size):
+                    all_results.append({
+                        "status": "error", 
+                        "error": f"Batch processing failed: {result.get('error', 'Unknown error')}"
+                    })
+        
+        return all_results
+
+
+class DonutInferenceService(BaseInferenceService):
+    def __init__(self, triton_client: http_client.InferenceServerClient):
+        super().__init__(triton_client, "donut")
+
+    def process_image_batches(self, batches: List[np.ndarray], actual_count: int) -> List[Dict[str, Any]]:
+        all_results = []
+        
+        for batch_idx, batch_data in enumerate(batches):
+            result = self._infer_single_batch(batch_data)
+            
+            if result["status"] == "success":
+                batch_start = batch_idx * AppConfig.DONUT_BATCH_SIZE
+                batch_end = min(batch_start + AppConfig.DONUT_BATCH_SIZE, actual_count)
+                batch_size = batch_end - batch_start
+                
+                batch_results = result["result"] if isinstance(result["result"], list) else [result["result"]]
+                all_results.extend(batch_results[:batch_size])
+            else:
+                all_results.append(result)
+        
+        return all_results
+
+
+class ImageValidator:
+    @staticmethod
+    def validate_content_type(image_file: UploadFile) -> None:
+        if not image_file.content_type or not image_file.content_type.startswith('image/'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid file type: {image_file.filename}"
+            )
+
+    @staticmethod
+    def validate_image_content(contents: bytes, filename: str) -> Image.Image:
+        if not contents:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Empty image file: {filename}"
+            )
+        
+        try:
+            img = Image.open(io.BytesIO(contents))
+            
+            if img.width == 0 or img.height == 0:
+                raise ValueError(f"Invalid image dimensions for {filename}")
+            
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            return img
+            
+        except Exception as img_error:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Failed to process image {filename}: {str(img_error)}"
+            )
+
+
+class ResultValidator:
+    @staticmethod
+    def validate_yolo_result(result: Dict[str, Any]) -> bool:
+        if not isinstance(result, dict):
+            return False
+        
+        required_keys = ["boxes", "confidences", "classes"]
+        for key in required_keys:
+            if key not in result:
+                return False
+            if not isinstance(result[key], list):
+                return False
+        
+        # Все массивы должны быть одинаковой длины
+        if result["boxes"] and result["confidences"] and result["classes"]:
+            boxes_len = len(result["boxes"])
+            if len(result["confidences"]) != boxes_len or len(result["classes"]) != boxes_len:
+                return False
+        
+        return True
+    
+    @staticmethod
+    def sanitize_yolo_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        sanitized = []
+        
+        for i, result in enumerate(results):
+            if ResultValidator.validate_yolo_result(result):
+                sanitized.append(result)
+            else:
+                logger.warning(f"Invalid YOLO result at index {i}: {result}")
+                sanitized.append({
+                    "boxes": [],
+                    "confidences": [],
+                    "classes": [],
+                    "status": "invalid_format"
+                })
+        
+        return sanitized
+
+
+app = FastAPI(
+    title="OCR API",
+    version="1.3.2",
+    description="OCR API with Triton Server integration for YOLO and Donut inference"
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,21 +317,28 @@ app.add_middleware(
 )
 
 MainTag = OpenApiTag(name="Main", description="CRUD operations main")
-
-app.openapi_tags = [
-    MainTag.model_dump()
-]
-
-S3_BUCKET_URL = None
-
-if "S3_BUCKET_URL" in os.environ:
-    S3_BUCKET_URL = os.environ["S3_BUCKET_URL"]
+app.openapi_tags = [MainTag.model_dump()]
 
 
-def _print_heading(message):
-    print("")
-    print(message)
-    print("-" * len(message))
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error(f"Validation error for {request.url}: {exc.errors()}")
+    
+    safe_errors = []
+    for error in exc.errors():
+        safe_error = {
+            "loc": error.get("loc", []),
+            "msg": error.get("msg", "Unknown error"),
+            "type": error.get("type", "unknown")
+        }
+        if "input" in error and not isinstance(error["input"], bytes):
+            safe_error["input"] = error["input"]
+        safe_errors.append(safe_error)
+    
+    return JSONResponse(
+        status_code=422,
+        content={"detail": safe_errors}
+    )
 
 
 @serve.deployment(
@@ -78,397 +359,117 @@ def _print_heading(message):
 @serve.ingress(app)
 class TritonDeployment:
     def __init__(self):
-        self._triton_client = http_client.InferenceServerClient(url="localhost:8080")
+        self._triton_client = http_client.InferenceServerClient(url=AppConfig.TRITON_URL)
+        self._validate_triton_connection()
+        self._yolo_service = YOLOInferenceService(self._triton_client)
+        self._donut_service = DonutInferenceService(self._triton_client)
+        self._image_validator = ImageValidator()
+        self._result_validator = ResultValidator()
 
+    def _validate_triton_connection(self) -> None:
         try:
             if not self._triton_client.is_server_live():
-                logger.error("ВНИМАНИЕ: Triton Server должен быть запущен отдельно")
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                    detail="Triton Server is not live.")
-            else:
-                logger.info("Triton Server доступен.")
+                logger.error("Triton Server не доступен")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Triton Server недоступен"
+                )
+            
+            for model_name in ["yolo", "donut"]:
+                if not self._triton_client.is_model_ready(model_name):
+                    logger.error(f"{model_name} модель не готова")
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail=f"{model_name} модель недоступна"
+                    )
+            
+            logger.info("Triton Server готов к работе")
+            
         except Exception as e:
-            logger.error(f"Ошибка при подключении к Triton Server: {e}")
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                detail=f"Error connecting to Triton Server: {e}")
+            logger.error(f"Ошибка подключения к Triton: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Ошибка Triton Server: {e}"
+            )
 
-        try:
-            if not self._triton_client.is_model_ready("donut"):
-                logger.error("Donut model is not ready on Triton Server.")
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                    detail="Donut model is not ready on Triton Server.")
-            if not self._triton_client.is_model_ready("yolo"):
-                logger.error("YOLO model is not ready on Triton Server.")
-                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                    detail="YOLO model is not ready on Triton Server.")
-        except Exception as error:
-            logger.error(f"Error checking model readiness on Triton Server: {error}")
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                                detail=f"Error checking model readiness on Triton Server: {error}")
-
-        _print_heading("Triton Server Ready")
-        _print_heading("Models Status (as reported by client)")
-        try:
-            pprint(self._triton_client.get_model_repository_index())
-        except Exception as e:
-            logger.error(f"Error getting model repository index: {e}")
-
+    async def _process_uploaded_images(self, images: List[UploadFile], target_size: tuple) -> List[np.ndarray]:
+        if not images:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Не предоставлены изображения"
+            )
+        
+        image_arrays = []
+        
+        for image_file in images:
+            self._image_validator.validate_content_type(image_file)
+            contents = await image_file.read()
+            img = self._image_validator.validate_image_content(contents, image_file.filename)
+            processed_image = ImageProcessor.resize_image(img, target_size)
+            image_arrays.append(processed_image)
+        
+        return image_arrays
 
     @app.post("/generate/yolo", tags=["Main"])
-    async def generate_yolo(self, images: List[UploadFile] = File(...)) -> Dict:
+    async def generate_yolo(self, images: List[UploadFile] = File(...)) -> Dict[str, Any]:
         try:
-            if not images:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST, 
-                    detail="No images provided"
-                )
+            logger.info(f"Processing {len(images)} images for YOLO inference")
             
-            YOLO_HEIGHT = 640
-            YOLO_WIDTH = 640
-            BATCH_SIZE = 16
+            image_arrays = await self._process_uploaded_images(images, AppConfig.YOLO_IMAGE_SIZE)
+            batches = ImageProcessor.create_batches(
+                image_arrays, 
+                AppConfig.YOLO_BATCH_SIZE, 
+                AppConfig.YOLO_IMAGE_SIZE
+            )
             
-            image_arrays = []
-            image_names = []
+            logger.info(f"Created {len(batches)} batches for processing")
             
-            for image_file in images:
-                contents = await image_file.read()
-                
-                if not contents:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Empty image file: {image_file.filename}"
-                    )
-                    
-                try:
-                    img = Image.open(io.BytesIO(contents))
-                    
-                    if img.width == 0 or img.height == 0:
-                        raise ValueError(f"Invalid image dimensions for {image_file.filename}")
-                        
-                    img_resized = img.resize((YOLO_WIDTH, YOLO_HEIGHT))
-                    img_array = np.array(img_resized)
-                    
-                    logger.info(f"Resized image {image_file.filename} to YOLO format: {img_array.shape}")
-                    
-                    if img_array.size == 0:
-                        raise ValueError(f"Empty image array for {image_file.filename}")
-                        
-                    image_arrays.append(img_array)
-                    image_names.append(image_file.filename)
-                    
-                except Exception as img_error:
-                    logger.error(f"Error processing image {image_file.filename}: {img_error}")
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Failed to process image {image_file.filename}: {str(img_error)}"
-                    )
+            detections = self._yolo_service.process_image_batches(batches, len(image_arrays))
+            clean_detections = self._result_validator.sanitize_yolo_results(detections)
+            successful_count = sum(1 for d in clean_detections if d.get("status") != "error")
             
-            if not image_arrays:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No valid images provided for processing"
-                )
-                
-            black_image = np.zeros((YOLO_HEIGHT, YOLO_WIDTH, 3), dtype=np.uint8)
-            
-            all_results = []
-            num_images = len(image_arrays)
-            num_batches = (num_images + BATCH_SIZE - 1) // BATCH_SIZE
-            
-            for batch_idx in range(num_batches):
-                start_idx = batch_idx * BATCH_SIZE
-                end_idx = min(start_idx + BATCH_SIZE, num_images)
-                actual_batch_size = end_idx - start_idx
-                
-                logger.info(f"Processing YOLO batch {batch_idx+1}/{num_batches} with {actual_batch_size} actual images")
-                
-                batch_arrays = []
-                
-                for i in range(start_idx, end_idx):
-                    batch_arrays.append(image_arrays[i])
-                
-                padding_needed = BATCH_SIZE - len(batch_arrays)
-                if padding_needed > 0:
-                    logger.info(f"Adding {padding_needed} black images to complete batch of {BATCH_SIZE}")
-                    batch_arrays.extend([black_image.copy() for _ in range(padding_needed)])
-                    
-                batch_data = np.stack(batch_arrays)
-                logger.info(f"YOLO batch shape: {batch_data.shape}, dtype: {batch_data.dtype}")
-
-                if batch_data.shape != (BATCH_SIZE, YOLO_HEIGHT, YOLO_WIDTH, 3):
-                    error_msg = f"Invalid batch shape: {batch_data.shape}, expected: ({BATCH_SIZE}, {YOLO_HEIGHT}, {YOLO_WIDTH}, 3)"
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-                    
-                input_image = http_client.InferInput(
-                    "image", 
-                    batch_data.shape, 
-                    np_to_triton_dtype(batch_data.dtype)
-                )
-                input_image.set_data_from_numpy(batch_data)
-                
-                model_metadata = self._triton_client.get_model_metadata(model_name="yolo")
-                output_names = [output['name'] for output in model_metadata['outputs']]
-                logger.info(f"Model outputs available: {output_names}")
-                
-                if not output_names:
-                    logger.error("Model has no defined outputs")
-                    all_results.extend([{"error": "Model has no outputs defined"} for _ in range(actual_batch_size)])
-                    continue
-                
-                output_name = output_names[0]
-                logger.info(f"Using output name: {output_name}")
-                
-                output_result = http_client.InferRequestedOutput(output_name)
-
-                try:
-                    response = self._triton_client.infer(
-                        model_name="yolo", 
-                        inputs=[input_image], 
-                        outputs=[output_result]
-                    )
-                    logger.info(f"Output response: {response.get_response()}")
-                    
-                    output_metadata = next(
-                        (out for out in response.get_response()['outputs'] 
-                        if out['name'] == output_name),
-                        None
-                    )
-                    logger.info(f"Output output_metadata: {output_metadata}")
-
-                    if not output_metadata:
-                        logger.warning(f"No output named '{output_name}' in response")
-                        all_results.append({"error": "No model output"})
-                        continue
-                    
-                    try:
-                        raw_results = response.as_numpy(output_name)
-                        
-                        if isinstance(raw_results, np.ndarray) and raw_results.size == 0:
-                            logger.warning(f"Empty numpy array received")
-                            all_results.append({"error": "Empty numpy array received"})
-                            continue
-                        
-                        if raw_results is not None:
-                            try:
-                                if raw_results.dtype == np.bytes_:
-                                    decoded = raw_results[0].item().decode('utf-8')
-                                    logger.warning(f"Decoded output: {decoded}")
-                                    parsed_result = json.loads(decoded)
-                                    all_results.extend(parsed_result)
-                                else:
-                                    all_results.append(raw_results.tolist())
-                            except json.JSONDecodeError:
-                                logger.error("Failed to decode JSON output")
-                                all_results.append({"error": "Failed to decode JSON output"})
-                            except Exception as e:
-                                logger.error(f"Output processing error: {str(e)}")
-                                all_results.append({"error": str(e)})
-                        else:
-                            logger.warning("Raw results is None")
-                            all_results.append({"error": "Raw results is None"})
-                    
-                    except ValueError as e:
-                        if "cannot reshape array of size 0" in str(e):
-                            logger.warning("Received empty array, returning empty result")
-                            all_results.append({"error": "Received empty array, returning empty result"})
-                        else:
-                            logger.error(f"ValueError: {str(e)}")
-                            all_results.append({"error": str(e)})
-                
-                except Exception as e:
-                    logger.error(f"Inference failed: {str(e)}")
-                    all_results.append({"error": str(e)})
-
             return {
-                "status": "success", 
-                "model": "yolo", 
-                "detections": all_results[:num_images]
+                "status": "success",
+                "model": "yolo",
+                "processed_images": len(image_arrays),
+                "successful_detections": successful_count,
+                "results": clean_detections
             }
-        
+            
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Error in YOLO inference: {e}", exc_info=True)
-            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-     
+            logger.error(f"Неожиданная ошибка в YOLO inference: {e}", exc_info=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Внутренняя ошибка сервера: {e}"
+            )
 
     @app.post("/generate/donut", tags=["Main"])
-    async def generate_donut(self, images: List[UploadFile] = File(...)) -> Dict:
+    async def generate_donut(self, images: List[UploadFile] = File(...)) -> Dict[str, Any]:
         try:
-            if not images:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No images provided"
-                )
-
-            DONUT_HEIGHT = 384
-            DONUT_WIDTH = 384
-            BATCH_SIZE = 1
-            
-            image_arrays = []
-            image_names = []
-            
-            for image_file in images:
-                contents = await image_file.read()
-                
-                if not contents:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Empty image file: {image_file.filename}"
-                    )
-                    
-                try:
-                    img = Image.open(io.BytesIO(contents))
-
-                    if img.width == 0 or img.height == 0:
-                        raise ValueError(f"Invalid image dimensions for {image_file.filename}")
-
-                    img_resized = img.resize((DONUT_WIDTH, DONUT_HEIGHT))
-                    img_array = np.array(img_resized)
-                    
-                    logger.info(f"Resized image {image_file.filename} to Donut format: {img_array.shape}")
-                    
-                    if img_array.size == 0:
-                        raise ValueError(f"Empty image array for {image_file.filename}")
-                    
-                    image_arrays.append(img_array)
-                    image_names.append(image_file.filename)
-                    
-                except Exception as img_error:
-                    logger.error(f"Error processing image {image_file.filename}: {img_error}")
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Failed to process image {image_file.filename}: {str(img_error)}"
-                    )
-            
-            if not image_arrays:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="No valid images provided for processing"
-                )
-                
-            black_image = np.zeros((DONUT_HEIGHT, DONUT_WIDTH, 3), dtype=np.uint8)
-            
-            all_results = []
-            num_images = len(image_arrays)
-            num_batches = (num_images + BATCH_SIZE - 1) // BATCH_SIZE
-            
-            for batch_idx in range(num_batches):
-                start_idx = batch_idx * BATCH_SIZE
-                end_idx = min(start_idx + BATCH_SIZE, num_images)
-                actual_batch_size = end_idx - start_idx
-                
-                logger.info(f"Processing Donut batch {batch_idx+1}/{num_batches} with {actual_batch_size} actual images")
-                
-                batch_arrays = []
-                
-                for i in range(start_idx, end_idx):
-                    batch_arrays.append(image_arrays[i])
-                
-                padding_needed = BATCH_SIZE - len(batch_arrays)
-                if padding_needed > 0:
-                    logger.info(f"Adding {padding_needed} placeholder images to complete Donut batch of {BATCH_SIZE}")
-                    batch_arrays.extend([black_image.copy() for _ in range(padding_needed)])
-                
-                batch_data = np.stack(batch_arrays)
-                
-                if batch_data.shape != (BATCH_SIZE, DONUT_HEIGHT, DONUT_WIDTH, 3):
-                    error_msg = f"Invalid batch shape: {batch_data.shape}, expected: ({BATCH_SIZE}, {DONUT_HEIGHT}, {DONUT_WIDTH}, 3)"
-                    logger.error(error_msg)
-                    raise ValueError(error_msg)
-                    
-                logger.info(f"Donut batch shape: {batch_data.shape}, dtype: {batch_data.dtype}")
-                
-                input_image = http_client.InferInput(
-                    "image", 
-                    batch_data.shape, 
-                    np_to_triton_dtype(batch_data.dtype)
-                )
-                input_image.set_data_from_numpy(batch_data)
-                
-                model_metadata = self._triton_client.get_model_metadata(model_name="donut")
-                output_names = [output['name'] for output in model_metadata['outputs']]
-                logger.info(f"Model outputs available: {output_names}")
-                
-                if not output_names:
-                    logger.error("Model has no defined outputs")
-                    all_results.extend([{"error": "Model has no outputs defined"} for _ in range(actual_batch_size)])
-                    continue
-                
-                output_name = output_names[0]
-                logger.info(f"Using output name: {output_name}")
-                
-                output_result = http_client.InferRequestedOutput(output_name)
-
-                try:
-                    response = self._triton_client.infer(
-                        model_name="donut", 
-                        inputs=[input_image], 
-                        outputs=[output_result]
-                    )
-                    logger.info(f"Output response: {response.get_response()}")
-                    
-                    output_metadata = next(
-                        (out for out in response.get_response()['outputs'] 
-                        if out['name'] == output_name),
-                        None
-                    )
-                    logger.info(f"Output output_metadata: {output_metadata}")
-
-                    if not output_metadata:
-                        logger.warning(f"No output named '{output_name}' in response")
-                        all_results.append({"error": "No model output"})
-                        continue
-                    
-                    try:
-                        raw_results = response.as_numpy(output_name)
-                        
-                        if isinstance(raw_results, np.ndarray) and raw_results.size == 0:
-                            logger.warning(f"Empty numpy array received")
-                            all_results.append({"error": "Empty numpy array received"})
-                            continue
-                        
-                        if raw_results is not None:
-                            try:
-                                if raw_results.dtype == np.bytes_:
-                                    decoded = raw_results[0].item().decode('utf-8')
-                                    logger.warning(f"Decoded output: {decoded}")
-                                    parsed_result = json.loads(decoded)
-                                    all_results.extend(parsed_result)
-                                else:
-                                    all_results.append(raw_results.tolist())
-                            except json.JSONDecodeError:
-                                logger.error("Failed to decode JSON output")
-                                all_results.append({"error": "Failed to decode JSON output"})
-                            except Exception as e:
-                                logger.error(f"Output processing error: {str(e)}")
-                                all_results.append({"error": str(e)})
-                        else:
-                            logger.warning("Raw results is None")
-                            all_results.append({"error": "Raw results is None"})
-                    
-                    except ValueError as e:
-                        if "cannot reshape array of size 0" in str(e):
-                            logger.warning("Received empty array, returning empty result")
-                            all_results.append({"error": "Received empty array, returning empty result"})
-                        else:
-                            logger.error(f"ValueError: {str(e)}")
-                            all_results.append({"error": str(e)})
-                
-                except Exception as e:
-                    logger.error(f"Inference failed: {str(e)}")
-                    all_results.append({"error": str(e)})
+            image_arrays = await self._process_uploaded_images(images, AppConfig.DONUT_IMAGE_SIZE)
+            batches = ImageProcessor.create_batches(
+                image_arrays,
+                AppConfig.DONUT_BATCH_SIZE,
+                AppConfig.DONUT_IMAGE_SIZE
+            )
+            ocr_results = self._donut_service.process_image_batches(batches, len(image_arrays))
             
             return {
-                "status": "success", 
-                "model": "donut", 
-                "ocr_results": all_results[:num_images]
+                "status": "success",
+                "model": "donut",
+                "processed_images": len(image_arrays),
+                "results": ocr_results
             }
             
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Error in Donut inference: {e}", exc_info=True)
+            logger.error(f"Неожиданная ошибка в Donut inference: {e}", exc_info=True)
             raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-                detail=str(e)
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Внутренняя ошибка сервера: {e}"
             )
 
 
@@ -476,98 +477,87 @@ def deployment(_args):
     return TritonDeployment.bind()
 
 
-def configure_logging(log_dir: str = None) -> logging.Logger:
+def configure_logging(log_dir: Optional[str] = None) -> logging.Logger:
     if log_dir is None:
         log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    
     os.makedirs(log_dir, exist_ok=True)
     script_name = Path(sys.argv[0]).stem
     log_file = os.path.join(log_dir, f"{script_name}.log")
+    
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
+    
     formatter = logging.Formatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"
     )
+    
     file_handler = RotatingFileHandler(
-        log_file, 
+        log_file,
         maxBytes=10*1024*1024,
         backupCount=5,
         encoding='utf-8'
     )
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
+    
     stdout_handler = logging.StreamHandler(sys.stdout)
     stdout_handler.setFormatter(formatter)
     root_logger.addHandler(stdout_handler)
+    
     app_logger = logging.getLogger('triton_app')
     app_logger.info(f"Логирование настроено. Файл логов: {log_file}")
     return app_logger
 
 
-def configure_ray_logging():
+def configure_ray_logging() -> None:
     try:
         from ray.serve._private.constants import SERVE_LOGGER_NAME
         serve_logger = logging.getLogger(SERVE_LOGGER_NAME)
         serve_logger.setLevel(logging.INFO)
         serve_logger.propagate = True
+        
         ray_logger = logging.getLogger("ray")
         ray_logger.setLevel(logging.INFO)
         ray_logger.propagate = True
+        
         logger.info("Ray Serve логирование настроено")
     except ImportError:
         logger.error("Не удалось импортировать Ray Serve для настройки логирования")
 
 
-if __name__ == "__main__":
+def test_models(test_image_path: str) -> None:
+    if not os.path.exists(test_image_path):
+        logger.info(f"Test image not found: {test_image_path}")
+        return
     
+    test_endpoints = [
+        ("http://localhost:8000/generate/yolo", "YOLO"),
+        ("http://localhost:8000/generate/donut", "Donut")
+    ]
+    
+    for endpoint, model_name in test_endpoints:
+        with open(test_image_path, "rb") as f:
+            files = [("images", (os.path.basename(test_image_path), f.read(), "image/jpeg"))]
+        
+        logger.info(f"Testing {model_name} model:")
+        try:
+            response = requests.post(endpoint, files=files)
+            logger.info(f"{model_name} Response Status: {response.status_code}")
+            logger.info(f"{model_name} Response Body: {response.json()}")
+        except requests.exceptions.ConnectionError:
+            logger.error(f"Could not connect to FastAPI app for {model_name} test")
+        except Exception as e:
+            logger.error(f"Error during {model_name} test: {e}")
+
+
+if __name__ == "__main__":
     configure_ray_logging()
     os.environ["RAY_BACKEND_LOG_LEVEL"] = "info"
     sys.stdout.flush()
     sys.stderr.flush()
+    
     logger.info("Запуск Ray Serve deployment")
     serve.run(TritonDeployment.bind(), route_prefix="/")
     
-    test_image_path = "/workspace/docs/test.jpg"
-    test_image_paths = [test_image_path, test_image_path]
-    valid_test_images = [path for path in test_image_paths if os.path.exists(path)]
-
-    if valid_test_images:
-        multipart_files_yolo = []
-        for i, path in enumerate(valid_test_images):
-            with open(path, "rb") as f:
-                multipart_files_yolo.append(("images", (os.path.basename(path), f.read(), "image/jpeg"))) 
-        
-        logger.info(f"Testing YOLO model with {len(valid_test_images)} images:")
-        try:
-            yolo_response = requests.post(
-                "http://localhost:8000/generate/yolo",
-                files=multipart_files_yolo
-            )
-            logger.info(f"YOLO Response Status: {yolo_response.status_code}")
-            logger.info(f"YOLO Response Body: {yolo_response.json()}")
-        except requests.exceptions.ConnectionError as ce:
-            logger.error(f"Could not connect to FastAPI app for YOLO test: {ce}. Is Ray Serve running?")
-        except Exception as e:
-            logger.error(f"An error occurred during YOLO test: {e}")
-
-        for file_tuple in multipart_files_yolo:
-            file_tuple[1].seek(0)
-         
-        multipart_files_donut = []
-        for i, path in enumerate(valid_test_images):
-            with open(path, "rb") as f:
-                multipart_files_donut.append(("images", (os.path.basename(path), f.read(), "image/jpeg")))
-
-        logger.info(f"\nTesting Donut model with {len(valid_test_images)} images:")
-        try:
-            donut_response = requests.post(
-                "http://localhost:8000/generate/donut",
-                files=multipart_files_donut
-            )
-            logger.info(f"Donut Response Status: {donut_response.status_code}")
-            logger.info(f"Donut Response Body: {donut_response.json()}")
-        except requests.exceptions.ConnectionError as ce:
-            logger.error(f"Could not connect to FastAPI app for Donut test: {ce}. Is Ray Serve running?")
-        except Exception as e:
-            logger.error(f"An error occurred during Donut test: {e}")
-    else:
-        logger.info(f"No test images found at specified paths: {test_image_paths}. Please provide valid images for testing.")
+    test_models("/workspace/docs/test.jpg")

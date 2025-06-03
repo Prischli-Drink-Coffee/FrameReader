@@ -1,5 +1,5 @@
 backend: "donut"
-max_batch_size: 1
+max_batch_size: 16
 
 dynamic_batching {
  max_queue_delay_microseconds: 100000
@@ -39,6 +39,36 @@ parameters[
   key: "image_width"
   value: {
     string_value: "384"
+  }
+},
+{
+  key: "max_length"
+  value: {
+    string_value: "64"
+  }
+},
+{
+  key: "num_beams"
+  value: {
+    string_value: "5"
+  }
+},
+{
+  key: "prompt"
+  value: {
+    string_value: ""
+  }
+},
+{
+  key: "task_start_token"
+  value: {
+    string_value: "<s_500k>"
+  }
+},
+{
+  key: "prompt_end_token"
+  value: {
+    string_value: "<s_prompt>"
   }
 }
 ]

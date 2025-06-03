@@ -1,11 +1,17 @@
 ARG BASE_IMAGE=nvcr.io/nvidia/tritonserver
-ARG BASE_IMAGE_TAG=24.01-py3
+ARG BASE_IMAGE_TAG=25.05-py3
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS tritonserver-frame-reader
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libgl1-mesa-glx \
+        wget \
+        gnupg
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglx0 \
         libglib2.0-0 \
         libgomp1 \
         locales \

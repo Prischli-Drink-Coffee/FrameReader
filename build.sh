@@ -9,7 +9,7 @@ SOURCE_DIR=$(dirname "$(readlink -f "$0")")
 DOCKERFILE=${SOURCE_DIR}/docker/Dockerfile
 
 BASE_IMAGE=nvcr.io/nvidia/tritonserver
-BASE_IMAGE_TAG_OCR=24.08-py3
+BASE_IMAGE_TAG_OCR=25.05-py3
 
 get_options() {
     while :; do
@@ -111,7 +111,7 @@ get_options() {
     fi
 
     if [ -z "$TAG" ]; then
-        TAG="tritonserver:r24.08"
+        TAG="tritonserver:25.05-py3"
 
     if [[ $FRAMEWORK == "OCR" ]]; then
         TAG+="-ocr"

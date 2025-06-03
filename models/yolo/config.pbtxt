@@ -40,5 +40,35 @@ parameters[
   value: {
     string_value: "640"
   }
+},
+{
+  key: "conf"
+  value: {
+    string_value: "0.2"
+  }
+},
+{
+  key: "iou"
+  value: {
+    string_value: "0.2"
+  }
+},
+{
+  key: "rect"
+  value: {
+    string_value: "true"
+  }
+},
+{
+  key: "max_det"
+  value: {
+    string_value: "300"
+  }
+},
+{
+  key: "classes"
+  value: {
+    string_value: ""
+  }
 }
 ]

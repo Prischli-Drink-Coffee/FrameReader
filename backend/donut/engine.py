@@ -649,18 +649,27 @@ class TRTInferenceEngine:
     
     def process_image(
         self, 
-        image: Union[str, Path, Image.Image],
+        image: Union[str, Path, Image.Image, torch.Tensor],
         max_length: int = 64,
         prompt: Optional[str] = None,
         return_json: bool = True
     ) -> Union[str, Dict[str, Any]]:
-
+        
         if isinstance(image, (str, Path)):
             image_path = Path(image)
             if not image_path.exists():
                 raise FileNotFoundError(f"Изображение не найдено: {image_path}")
             image = Image.open(image_path).convert("RGB")
-
+        
+        if isinstance(image, torch.Tensor):
+            if image.dim() == 4:
+                if image.size(0) != 1:
+                    raise ValueError("Для process_image ожидается один тензор изображения (batch size=1)")
+                image = image.squeeze(0)
+            
+            if image.dim() != 3 or image.size(0) not in {1, 3}:
+                raise ValueError(f"Ожидается тензор формы (C, H, W), получено {image.shape}")
+        
         pixel_values = self.processor(image, return_tensors="pt").pixel_values
         pixel_values = pixel_values.to(self.device)
 
@@ -683,30 +692,30 @@ class TRTInferenceEngine:
 
         start_time = time.time()
         with torch.no_grad():
-                outputs = self.model(pixel_values, padded_input_ids)
-                
-                if isinstance(outputs, dict):
-                    if 'logits' in outputs:
-                        logits = outputs['logits']
-                    elif 'last_hidden_state' in outputs:
-                        logits = outputs['last_hidden_state']
-                    else:
-                        for key, value in outputs.items():
-                            if isinstance(value, torch.Tensor):
-                                logits = value
-                                break
-                        else:
-                            raise ValueError(f"Не удалось найти тензор в выходных данных модели: {outputs.keys()}")
+            outputs = self.model(pixel_values, padded_input_ids)
+            
+            if isinstance(outputs, dict):
+                if 'logits' in outputs:
+                    logits = outputs['logits']
+                elif 'last_hidden_state' in outputs:
+                    logits = outputs['last_hidden_state']
                 else:
-                    logits = outputs
-                
-                generated_sequence = decoder_input_ids[0].cpu().tolist()
-                for i in range(seq_length, max_length):
-                    pos_logits = logits[0, i-1, :]
-                    next_token_id = torch.argmax(pos_logits).item()
-                    generated_sequence.append(next_token_id)
-                    if next_token_id == self.eos_token_id:
-                        break
+                    for key, value in outputs.items():
+                        if isinstance(value, torch.Tensor):
+                            logits = value
+                            break
+                    else:
+                        raise ValueError(f"Не удалось найти тензор в выходных данных модели: {outputs.keys()}")
+            else:
+                logits = outputs
+            
+            generated_sequence = decoder_input_ids[0].cpu().tolist()
+            for i in range(seq_length, max_length):
+                pos_logits = logits[0, i-1, :]
+                next_token_id = torch.argmax(pos_logits).item()
+                generated_sequence.append(next_token_id)
+                if next_token_id == self.eos_token_id:
+                    break
         
         inference_time = time.time() - start_time
         logger.debug(f"Время инференса: {inference_time:.4f} с")
@@ -728,7 +737,7 @@ class TRTInferenceEngine:
     
     def process_batch(
         self, 
-        images: List[Union[str, Path, Image.Image]],
+        images: List[Union[str, Path, Image.Image, torch.Tensor]],
         prompt: Optional[str] = None,
         batch_size: int = 1,
         max_length: int = 64,
@@ -742,7 +751,16 @@ class TRTInferenceEngine:
             batch_results = []
             
             for image in batch_images:
-                try:                    
+                try:
+                    if isinstance(image, torch.Tensor):
+                        if image.dim() == 3:
+                            image = image.unsqueeze(0)
+                        elif image.dim() == 4:
+                            if image.size(0) != 1:
+                                raise ValueError("Для process_batch каждый тензор должен содержать ровно одно изображение")
+                        else:
+                            raise ValueError(f"Неподдерживаемая размерность тензора: {image.shape}")
+                    
                     result = self.process_image(
                         image, 
                         prompt=prompt, 
@@ -753,6 +771,7 @@ class TRTInferenceEngine:
                     batch_results.append(result)
                             
                 except Exception as e:
+                    image_path = str(image) if not isinstance(image, torch.Tensor) else f"Tensor{image.shape}"
                     logger.error(f"Ошибка при обработке {image_path}: {e}")
                     batch_results.append(None)
             
