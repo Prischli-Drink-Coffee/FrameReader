@@ -25,11 +25,8 @@
 ### Установка зависимостей
 
 ```bash
-# Установка через uv (рекомендуется)
-uv pip install -r requirements.txt
-
-# Или стандартным способом
-pip install -r requirements.txt
+# Установка через uv
+uv sync
 ```
 
 ---
