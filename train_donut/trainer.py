@@ -476,7 +476,6 @@ class DonutTrainer:
     ):
         print(f"{100*'-'}")
 
-        # Получаем предсказания из логитов
         raw_pred_ids = outputs.logits[0].argmax(dim=-1)
         raw_pred = processor.batch_decode(
             raw_pred_ids.unsqueeze(0),
@@ -485,7 +484,6 @@ class DonutTrainer:
 
         original_labels = labels[0].clone()
 
-        # Обработка меток
         label_tokens = []
         if labels is not None:
             label_token_ids = labels[0].clone()
@@ -506,7 +504,6 @@ class DonutTrainer:
         label_json['text_sequence'] = self._tokens_to_readable_text(label_text.split('_'))
         label_str = json.dumps(label_json, ensure_ascii=False, indent=2)
         
-        # Обработка предсказаний
         pred_tokens = []
         for token_id in raw_pred_ids:
             token = processor.tokenizer.convert_ids_to_tokens(token_id.item())

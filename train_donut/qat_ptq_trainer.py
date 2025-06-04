@@ -324,7 +324,6 @@ class DonutTRTConverter:
     ) -> Dict[str, Any]:
         logger.info(f"Измерение производительности модели: {model_path}")
         try:
-            # Assuming the model was saved using torch.save
             model_trt = torch.load(model_path, weights_only=False).to(self.device).eval()
             dummy_pixel_values, dummy_decoder_input_ids = self._prepare_dummy_input()
 
@@ -602,7 +601,6 @@ def optimize_donut_model(
             calibration_batches=calibration_batches, device=device,
             calibration_cache_file=str(output_dir_path / f"calibration_quantized_{trt_converter_precision}.cache")
         )
-        # export_to_torchscript is called before compile_with_tensorrt
         torchscript_path = converter.export_to_torchscript(model_to_export_nn_module=quantized_donut_model.model)
         trt_path = converter.compile_with_tensorrt(torchscript_model_path=torchscript_path)
         benchmark_results = converter.benchmark_model(trt_path)

@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""
-Скрипт для проверки и исправления JSONL файлов датасета Donut.
-Поддерживает обработку файлов с различными кодировками и удаление проблемных записей.
-"""
+
 import os
 import glob
 import json
@@ -13,41 +10,24 @@ import logging
 
 
 class JSONLValidator:
-    """
-    Класс для валидации и исправления JSONL файлов.
-    """
     
     def __init__(self, fix: bool = False, verbose: bool = False, remove_broken: bool = True):
-        """
-        Инициализирует валидатор JSONL файлов.
-        
-        Args:
-            fix: Если True, исправлять найденные ошибки
-            verbose: Если True, выводить подробную информацию о процессе
-            remove_broken: Если True, удалять невосстановимые записи вместо создания новых
-        """
+
         self.fix = fix
         self.verbose = verbose
         self.remove_broken = remove_broken
         self.logger = self._setup_logger()
     
     def _setup_logger(self) -> logging.Logger:
-        """
-        Настраивает логгер для вывода информации.
-        
-        Returns:
-            Настроенный логгер
-        """
+
         logger = logging.getLogger("jsonl_validator")
         logger.setLevel(logging.INFO)
         
-        # Очистка обработчиков, если они уже существуют
         if logger.handlers:
             logger.handlers.clear()
         
         formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
         
-        # Вывод в консоль
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
@@ -55,17 +35,9 @@ class JSONLValidator:
         return logger
     
     def detect_encoding(self, file_path: str) -> str:
-        """
-        Определяет кодировку файла.
-        
-        Args:
-            file_path: Путь к файлу
-            
-        Returns:
-            Кодировка файла
-        """
+
         with open(file_path, 'rb') as f:
-            raw_data = f.read(10000)  # Читаем первые 10000 байт для определения кодировки
+            raw_data = f.read(10000)
             result = chardet.detect(raw_data)
             encoding = result['encoding']
             confidence = result['confidence']
@@ -73,8 +45,6 @@ class JSONLValidator:
             if self.verbose:
                 self.logger.info(f"Обнаружена кодировка {encoding} с уверенностью {confidence:.2f} для файла {file_path}")
             
-            # Если кодировка не определена или определена с низкой уверенностью,
-            # пробуем определить по большему фрагменту
             if encoding is None or confidence < 0.7:
                 with open(file_path, 'rb') as f:
                     raw_data = f.read()
@@ -85,7 +55,6 @@ class JSONLValidator:
                     if self.verbose:
                         self.logger.info(f"Повторное определение: кодировка {encoding} с уверенностью {confidence:.2f}")
             
-            # Если всё еще не удалось определить кодировку, используем Latin-1 как безопасную опцию
             if encoding is None:
                 self.logger.warning(f"Не удалось определить кодировку файла {file_path}, используем Latin-1")
                 return 'latin-1'
@@ -93,15 +62,6 @@ class JSONLValidator:
             return encoding
     
     def read_file_with_encoding(self, file_path: str) -> List[str]:
-        """
-        Читает файл с автоматическим определением кодировки.
-        
-        Args:
-            file_path: Путь к файлу
-            
-        Returns:
-            Список строк файла
-        """
         encoding = self.detect_encoding(file_path)
         
         try:
@@ -121,17 +81,6 @@ class JSONLValidator:
                 return []
     
     def validate_json_line(self, line: str, line_number: int, file_path: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
-        """
-        Проверяет и пытается исправить строку JSON.
-        
-        Args:
-            line: Строка JSON
-            line_number: Номер строки
-            file_path: Путь к файлу (для логов)
-            
-        Returns:
-            Кортеж (is_valid, fixed_json)
-        """
         line = line.strip()
         if not line:
             if self.verbose:
@@ -141,7 +90,6 @@ class JSONLValidator:
         try:
             entry = json.loads(line)
             
-            # Проверка наличия необходимых полей
             missing_fields = []
             if "file_name" not in entry:
                 missing_fields.append("file_name")
@@ -149,7 +97,6 @@ class JSONLValidator:
             if "ground_truth" not in entry:
                 missing_fields.append("ground_truth")
             else:
-                # Проверка, что ground_truth содержит валидный JSON
                 try:
                     gt = json.loads(entry["ground_truth"])
                     if "gt_parse" not in gt:
@@ -157,7 +104,6 @@ class JSONLValidator:
                             self.logger.warning(f"Отсутствует поле 'gt_parse' в ground_truth в файле {file_path} на строке {line_number}")
                         
                         if self.fix:
-                            # Добавляем пустой gt_parse, если его нет
                             gt["gt_parse"] = {}
                             entry["ground_truth"] = json.dumps(gt)
                             return True, entry
@@ -166,13 +112,9 @@ class JSONLValidator:
                         self.logger.warning(f"Некорректный JSON в поле 'ground_truth' в файле {file_path} на строке {line_number}")
                     
                     if self.fix:
-                        # Пытаемся исправить ground_truth
                         try:
-                            # Если это строка в кавычках, пробуем распарсить её
                             if isinstance(entry["ground_truth"], str):
-                                # Заменяем одинарные кавычки на двойные
                                 fixed_gt = entry["ground_truth"].replace("'", "\"")
-                                # Пробуем парсить
                                 try:
                                     gt = json.loads(fixed_gt)
                                     if "gt_parse" not in gt:
@@ -184,7 +126,6 @@ class JSONLValidator:
                                         self.logger.warning(f"Удаляем запись с невосстановимым JSON в поле 'ground_truth' в файле {file_path} на строке {line_number}")
                                         return False, None
                                     else:
-                                        # Если не удаётся исправить, создаём новый объект
                                         entry["ground_truth"] = json.dumps({"gt_parse": {}})
                                         return True, entry
                         except Exception:
@@ -192,7 +133,6 @@ class JSONLValidator:
                                 self.logger.warning(f"Удаляем запись с невосстановимым JSON в поле 'ground_truth' в файле {file_path} на строке {line_number}")
                                 return False, None
                             else:
-                                # Если не удалось исправить, создаём новый объект
                                 entry["ground_truth"] = json.dumps({"gt_parse": {}})
                                 return True, entry
             
@@ -201,11 +141,10 @@ class JSONLValidator:
                     self.logger.warning(f"Отсутствуют поля {', '.join(missing_fields)} в файле {file_path} на строке {line_number}")
                 
                 if self.fix:
-                    if self.remove_broken and len(missing_fields) > 1:  # Если отсутствуют оба обязательных поля
+                    if self.remove_broken and len(missing_fields) > 1:
                         self.logger.warning(f"Удаляем запись с отсутствующими обязательными полями в файле {file_path} на строке {line_number}")
                         return False, None
                     
-                    # Добавляем отсутствующие поля
                     if "file_name" not in entry:
                         entry["file_name"] = f"unknown_{line_number}.png"
                     
@@ -224,25 +163,19 @@ class JSONLValidator:
             if not self.fix:
                 return False, None
             
-            # Попытка исправить JSON
             try:
-                # Попытка исправления типичных ошибок
                 fixed_line = line
                 
-                # Проверка на незакрытые скобки
                 if fixed_line.count('{') > fixed_line.count('}'):
                     fixed_line += '}' * (fixed_line.count('{') - fixed_line.count('}'))
                 
-                # Проверка на незакрытые кавычки (исправляем только если нечетное число)
                 if fixed_line.count('"') % 2 != 0:
                     fixed_line += '"'
                 
-                # Попытка парсинга исправленной строки
                 try:
                     entry = json.loads(fixed_line)
                     self.logger.info(f"Успешно исправлен JSON в файле {file_path} на строке {line_number}")
                     
-                    # Проверка и исправление отсутствующих полей
                     has_required_fields = True
                     if "file_name" not in entry:
                         has_required_fields = False
@@ -254,7 +187,6 @@ class JSONLValidator:
                         self.logger.warning(f"Удаляем запись с отсутствующими обязательными полями в файле {file_path} на строке {line_number}")
                         return False, None
                     
-                    # Исправление полей, если не удаляем запись
                     if "file_name" not in entry:
                         entry["file_name"] = f"unknown_{line_number}.png"
                     
@@ -279,7 +211,6 @@ class JSONLValidator:
                         self.logger.warning(f"Удаляем запись с невосстановимым JSON в файле {file_path} на строке {line_number}")
                         return False, None
                     else:
-                        # Если не удается исправить, создаем новую запись
                         self.logger.warning(f"Не удалось исправить JSON в файле {file_path} на строке {line_number}, создаем новую запись")
                         return True, {"file_name": f"unknown_{line_number}.png", "ground_truth": json.dumps({"gt_parse": {}})}
             
@@ -292,15 +223,7 @@ class JSONLValidator:
                     return False, None
     
     def validate_jsonl_file(self, file_path: str) -> bool:
-        """
-        Проверяет и исправляет JSONL файл.
-        
-        Args:
-            file_path: Путь к файлу
-            
-        Returns:
-            True, если файл был успешно проверен и исправлен (если fix=True)
-        """
+
         self.logger.info(f"Проверка файла: {file_path}")
         
         try:
@@ -337,7 +260,6 @@ class JSONLValidator:
                     self.logger.info(f"Найдено {invalid_count} некорректных строк и {empty_count} пустых строк в файле {file_path}")
                 
                 if self.fix and valid_entries:
-                    # Создаем бэкап файла перед перезаписью
                     backup_path = file_path + ".bak"
                     try:
                         import shutil
@@ -346,7 +268,6 @@ class JSONLValidator:
                     except Exception as e:
                         self.logger.error(f"Не удалось создать бэкап файла: {e}")
                     
-                    # Записываем исправленные данные
                     try:
                         with open(file_path, 'w', encoding='utf-8') as f:
                             for entry in valid_entries:
@@ -366,12 +287,6 @@ class JSONLValidator:
             return False
     
     def validate_jsonl_files(self, directory_path: str) -> None:
-        """
-        Проверяет все JSONL файлы в указанной директории.
-        
-        Args:
-            directory_path: Путь к директории с JSONL файлами
-        """
         jsonl_files = []
         for root, _, files in os.walk(directory_path):
             for file in files:
@@ -389,18 +304,7 @@ class JSONLValidator:
 
 
 def convert_file_encoding(file_path: str, target_encoding: str = 'utf-8') -> bool:
-    """
-    Конвертирует файл в указанную кодировку.
-    
-    Args:
-        file_path: Путь к файлу
-        target_encoding: Целевая кодировка
-        
-    Returns:
-        True, если конвертация выполнена успешно
-    """
     try:
-        # Определяем текущую кодировку
         with open(file_path, 'rb') as f:
             raw_data = f.read()
             result = chardet.detect(raw_data)
@@ -412,16 +316,13 @@ def convert_file_encoding(file_path: str, target_encoding: str = 'utf-8') -> boo
             
             print(f"Конвертация файла {file_path} из {source_encoding} в {target_encoding}")
             
-            # Декодируем содержимое файла и перекодируем в целевую кодировку
             content = raw_data.decode(source_encoding, errors='replace')
             
-            # Создаем бэкап файла
             backup_path = file_path + f".{source_encoding}.bak"
             import shutil
             shutil.copy2(file_path, backup_path)
             print(f"Создан бэкап файла: {backup_path}")
             
-            # Записываем в новой кодировке
             with open(file_path, 'w', encoding=target_encoding) as f:
                 f.write(content)
             
@@ -434,9 +335,6 @@ def convert_file_encoding(file_path: str, target_encoding: str = 'utf-8') -> boo
 
 
 def main():
-    """
-    Основная функция скрипта.
-    """
     parser = argparse.ArgumentParser(description="Проверка и исправление JSONL файлов датасета Donut")
     parser.add_argument("dir", help="Путь к директории с JSONL файлами")
     parser.add_argument("--fix", action="store_true", help="Исправлять найденные ошибки")
@@ -446,7 +344,6 @@ def main():
     args = parser.parse_args()
     
     if args.convert:
-        # Конвертируем все JSONL файлы в UTF-8
         jsonl_files = []
         for root, _, files in os.walk(args.dir):
             for file in files:
@@ -458,7 +355,6 @@ def main():
         for file_path in jsonl_files:
             convert_file_encoding(file_path, 'utf-8')
     
-    # Запускаем валидацию
     validator = JSONLValidator(fix=args.fix, verbose=args.verbose, remove_broken=not args.keep_broken)
     validator.validate_jsonl_files(args.dir)
 

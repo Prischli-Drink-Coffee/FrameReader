@@ -180,7 +180,6 @@ class TrOCRModel:
                 torch_dtype=dtype
             )
 
-        # Проверка согласования словаря
         tokenizer_vocab_size = len(self.tokenizer)
         decoder_vocab_size = self.decoder.config.vocab_size
         
@@ -682,8 +681,6 @@ class TrOCRModel:
             outputs = self._forward_eval(pixel_values, labels)
 
         if labels is not None and hasattr(outputs, 'loss'):
-            # Здесь мы можем убедиться, что потери рассчитаны правильно
-            # Если возникают проблемы, можно пересчитать их здесь
             if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
                 logger.warning("Обнаружены неправильные потери (NaN/Inf). Пересчет...")
                 loss_fct = nn.CrossEntropyLoss(ignore_index=-100)

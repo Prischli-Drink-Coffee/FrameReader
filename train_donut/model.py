@@ -448,9 +448,6 @@ class DonutModel:
         return decoded_sequences if not kwargs.get("return_tensors", False) else outputs.sequences
 
     def token2json(self, tokens, is_inner_value=False):
-        """
-        Convert a (generated) token sequence into an ordered JSON format
-        """
         output = dict()
 
         while tokens:
@@ -469,7 +466,7 @@ class DonutModel:
                 content = re.search(f"{start_token_escaped}(.*?){end_token_escaped}", tokens, re.IGNORECASE)
                 if content is not None:
                     content = content.group(1).strip()
-                    if r"<s_" in content and r"</s_" in content:  # non-leaf node
+                    if r"<s_" in content and r"</s_" in content:
                         value = self.token2json(content, is_inner_value=True)
                         if value:
                             if len(value) == 1:
@@ -480,13 +477,13 @@ class DonutModel:
                         for leaf in content.split(r"<sep/>"):
                             leaf = leaf.strip()
                             if leaf in self.processor.tokenizer.get_added_vocab() and leaf[0] == "<" and leaf[-2:] == "/>":
-                                leaf = leaf[1:-2]  # for categorical special tokens
+                                leaf = leaf[1:-2]
                             output[key].append(leaf)
                         if len(output[key]) == 1:
                             output[key] = output[key][0]
 
                 tokens = tokens[tokens.find(end_token) + len(end_token):].strip()
-                if tokens[:6] == r"<sep/>":  # non-leaf nodes
+                if tokens[:6] == r"<sep/>":
                     return [output] + self.token2json(tokens[6:], is_inner_value=True)
 
         if len(output):

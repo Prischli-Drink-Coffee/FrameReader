@@ -138,7 +138,6 @@ class MemoryOptimizer:
                     logger.warning("FlashAttention недоступен. Установите с помощью: pip install flash-attn")
                     use_flash_attention = False
             
-            # Попытка применить эффективное по памяти внимание
             if use_mem_efficient and not use_flash_attention:
                 try:
                     from transformers.models.t5.modeling_t5 import T5Attention

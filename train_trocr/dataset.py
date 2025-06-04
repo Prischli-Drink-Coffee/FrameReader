@@ -93,7 +93,7 @@ class TrOCRDataset(Dataset):
             transforms.RandomApply([
                 transforms.GaussianBlur(kernel_size=3, sigma=(0.1, 1.0))
             ], p=0.1),
-            transforms.RandomRotation(degrees=1),  # Минимальный поворот для сохранения читаемости
+            transforms.RandomRotation(degrees=1),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])

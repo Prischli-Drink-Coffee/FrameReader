@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 class TextCleanup:
     @staticmethod
     def cleanup_donut_output(text):
-        """Очищает выходные данные Donut от специальных токенов."""
         text = re.sub(r"<s_([^>]*)>", "", text)
         text = re.sub(r"</s_[^>]*>", "", text)
         text = text.replace("<sep/>", ", ")
@@ -38,7 +37,6 @@ class TextCleanup:
 
     @staticmethod
     def extract_fields_from_donut_output(text):
-        """Извлекает поля из выходных данных Donut и преобразует их в словарь."""
         output = {}
         
         while text:
@@ -79,7 +77,6 @@ class TextCleanup:
 class EditDistanceMetric:
     @staticmethod
     def calculate(prediction: str, reference: str) -> float:
-        """Вычисляет нормализованное расстояние редактирования между двумя строками."""
         if not reference:
             return 0.0 if not prediction else 1.0
         
@@ -114,7 +111,6 @@ class DonutInferenceEngine:
         )
         logger.info(f"Модель загружена за {time.time() - start_time:.2f} с")
 
-        # Получаем информацию о токенах модели
         self.task_start_token = self.model.task_start_token
         self.prompt_end_token = getattr(self.model, 'prompt_end_token', self.task_start_token)
         self.eos_token = self.model.processor.tokenizer.eos_token
@@ -125,12 +121,6 @@ class DonutInferenceEngine:
         logger.info(f"Модель инициализирована на устройстве {self.device}, точность: {self.precision}")
     
     def prepare_prompt(self, prompt: Optional[str] = None) -> str:
-        """
-        Подготавливает правильный промпт для модели.
-        
-        Если prompt не указан, возвращает только токен начала задачи.
-        Если prompt указан, возвращает токен начала задачи + промпт + токен конца промпта.
-        """
         if prompt is None or prompt.strip() == "":
             return self.task_start_token
         else:
@@ -155,7 +145,6 @@ class DonutInferenceEngine:
         pixel_values = processor(image, return_tensors="pt").pixel_values
         pixel_values = pixel_values.to(self.device)
         
-        # Формируем правильный промпт для модели
         input_prompt = self.prepare_prompt(prompt)
         
         decoder_input_ids = processor.tokenizer(
@@ -184,11 +173,9 @@ class DonutInferenceEngine:
                     return_json=return_json
                 )
         
-        # Если модель уже вернула JSON, просто используем его
         result = None
         if return_json and isinstance(outputs, list) and isinstance(outputs[0], dict):
             result = outputs[0]
-        # Иначе, преобразуем строковый вывод в JSON
         elif isinstance(outputs, list):
             text_output = outputs[0]
             if return_json:
@@ -202,7 +189,6 @@ class DonutInferenceEngine:
         else:
             result = outputs
         
-        # Сохраняем результат, если указан путь
         if save_path:
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,8 +198,6 @@ class DonutInferenceEngine:
                     json.dump(result, f, ensure_ascii=False, indent=2)
                 else:
                     f.write(result)
-            
-            # logger.info(f"Результат сохранен в {save_path}")
         
         return result
     
@@ -334,7 +318,6 @@ class DonutInferenceEngine:
                 
                 logger.info(f"Среднее расстояние редактирования: {avg_edit_distance:.4f}")
         
-        # Сохраняем метрики, если указана директория
         if save_results and output_dir:
             metrics_path = Path(output_dir) / "evaluation_metrics.json"
             with open(metrics_path, "w", encoding="utf-8") as f:
@@ -361,14 +344,12 @@ class DonutInferenceEngine:
         else:
             pil_image = image
 
-        # Если путь для сохранения не указан, но указана директория, формируем путь
         if save_path is None and output_dir is not None and isinstance(image, (str, Path)):
             output_dir = Path(output_dir)
             output_dir.mkdir(parents=True, exist_ok=True)
             image_name = Path(image).stem
             save_path = output_dir / f"{image_name}_visualized.png"
 
-        # Обрабатываем результат, но не сохраняем JSON (он будет сохранен отдельно)
         result = self.process_image(pil_image, prompt=prompt, return_json=return_json)
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 12))
@@ -396,9 +377,7 @@ class DonutInferenceEngine:
             save_path = Path(save_path)
             save_path.parent.mkdir(parents=True, exist_ok=True)
             plt.savefig(save_path, bbox_inches='tight')
-            # logger.info(f"Визуализация сохранена в {save_path}")
             
-            # Сохраняем также JSON результат
             if output_dir is not None:
                 json_path = output_dir / f"{save_path.stem.replace('_visualized', '')}_result.json"
                 with open(json_path, "w", encoding="utf-8") as f:
@@ -406,7 +385,6 @@ class DonutInferenceEngine:
                         json.dump(result, f, ensure_ascii=False, indent=2)
                     else:
                         f.write(result)
-                # logger.info(f"Результат сохранен в {json_path}")
         else:
             plt.show()
         

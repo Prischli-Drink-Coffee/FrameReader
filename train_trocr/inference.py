@@ -192,14 +192,11 @@ def process_batch(
     autocast_fn: Any,
     autocast_enabled: bool
 ) -> List[Dict[str, Any]]:
-    """
-    Обработка пакета изображений для получения текста.
-    """
+
     results = []
     valid_images = [img for img in image_batch if img is not None]
     valid_indices = [i for i, img in enumerate(image_batch) if img is not None]
     
-    # Проверка наличия изображений
     if not valid_images:
         for path in image_paths:
             results.append({
@@ -209,7 +206,6 @@ def process_batch(
             })
         return results
 
-    # Обработка изображений с помощью процессора
     try:
         processor_outputs = model.processor(
             images=valid_images, 
@@ -227,19 +223,14 @@ def process_batch(
             })
         return results
     
-    # Генерация текста
     try:
-        # Запускаем в контексте с нужной точностью
         with autocast_fn() if autocast_enabled else torch.no_grad():
-            # Метод 1: Использование метода generate в модели TrOCRModel
             if hasattr(model, "generate") and callable(model.generate):
                 logger.info("Использование model.generate()")
                 
-                # Создаем копию параметров без decoder_input_ids
                 safe_params = generation_params.copy()
                 safe_params.pop('decoder_input_ids', None)
                 
-                # В соответствии с сигнатурой в model.py
                 generated_texts = model.generate(
                     pixel_values=pixel_values,
                     max_length=safe_params.pop('max_length', 64),
@@ -253,30 +244,24 @@ def process_batch(
                     no_repeat_ngram_size=safe_params.pop('no_repeat_ngram_size', 0)
                 )
             
-            # Метод 2: Использование метода generate встроенной модели
             elif hasattr(model, "model") and hasattr(model.model, "generate") and callable(model.model.generate):
                 logger.info("Использование model.model.generate()")
                 
-                # Для внутренней модели сохраняем все параметры, включая decoder_input_ids
                 generated_ids = model.model.generate(
                     pixel_values=pixel_values,
                     **generation_params
                 )
                 
-                # Получаем тексты из сгенерированных токенов
                 generated_texts = model.processor.tokenizer.batch_decode(
                     generated_ids, 
                     skip_special_tokens=True,
                     clean_up_tokenization_spaces=True
                 )
             
-            # Метод 3: Прямой запуск модели и получение логитов
             else:
                 logger.info("Использование метода forward и ручное декодирование")
                 
-                # Проверяем тип модели для правильной передачи данных
                 if hasattr(model, "model") and hasattr(model.model, "encoder"):
-                    # Для моделей encoder-decoder создаем начальные токены декодера
                     batch_size = pixel_values.size(0)
                     if hasattr(model.model, "config") and hasattr(model.model.config, "decoder_start_token_id") and \
                        model.model.config.decoder_start_token_id is not None:
@@ -295,18 +280,15 @@ def process_batch(
                             device=model.device
                         )
                     else:
-                        # Если нет нужного токена, используем 0 (обычно это PAD)
                         decoder_input_ids = torch.zeros(
                             (batch_size, 1),
                             dtype=torch.long,
                             device=model.device
                         )
                     
-                    # Итеративное декодирование
                     max_length = generation_params.get("max_length", 64)
                     eos_token_id = model.processor.tokenizer.eos_token_id
                     
-                    # Генерируем по одному токену за раз
                     all_generated_ids = decoder_input_ids.clone()
                     for _ in range(max_length - 1):
                         outputs = model.model(
@@ -315,18 +297,14 @@ def process_batch(
                             return_dict=True
                         )
                         
-                        # Получаем предсказания следующего токена
                         next_token_logits = outputs.logits[:, -1, :]
                         next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
                         
-                        # Добавляем предсказанный токен к уже сгенерированным
                         all_generated_ids = torch.cat([all_generated_ids, next_tokens], dim=1)
                         
-                        # Проверяем, завершена ли генерация (если встретили EOS токен)
                         if eos_token_id is not None and (next_tokens == eos_token_id).all():
                             break
                     
-                    # Декодируем токены в тексты
                     generated_texts = model.processor.tokenizer.batch_decode(
                         all_generated_ids,
                         skip_special_tokens=True,
@@ -334,19 +312,15 @@ def process_batch(
                     )
                 
                 else:
-                    # Для моделей только с энкодером
                     outputs = model.model(pixel_values=pixel_values, return_dict=True)
                     
-                    # Получаем предсказания из логитов
                     if hasattr(outputs, "logits"):
                         logits = outputs.logits
                     else:
                         logits = outputs[0] if isinstance(outputs, tuple) else outputs
                     
-                    # Берем индексы максимальных вероятностей как предсказанные токены
                     predicted_ids = torch.argmax(logits, dim=-1)
                     
-                    # Декодируем токены в тексты
                     generated_texts = []
                     for ids in predicted_ids:
                         text = model.processor.tokenizer.decode(
@@ -368,8 +342,7 @@ def process_batch(
                 "error": f"Ошибка генерации: {str(e)}"
             })
         return results
-    
-    # Создание результатов
+
     for i, path in enumerate(image_paths):
         if i in valid_indices:
             idx = valid_indices.index(i)
@@ -464,7 +437,6 @@ def main() -> None:
         )
         model.eval()
         
-        # Добавляем информацию о модели
         logger.info(f"Информация о модели:")
         logger.info(f"  Тип модели: {type(model)}")
         if hasattr(model, 'model'):
@@ -473,7 +445,6 @@ def main() -> None:
             logger.info(f"  Процессор: {type(model.processor)}")
             logger.info(f"  Токенизатор: {type(model.processor.tokenizer)}")
             
-        # Проверка наличия метода generate
         has_generate = hasattr(model, 'generate')
         has_model_generate = hasattr(model.model, 'generate') if hasattr(model, 'model') else False
         logger.info(f"  Наличие метода generate: model.generate={has_generate}, model.model.generate={has_model_generate}")
@@ -483,14 +454,12 @@ def main() -> None:
     
     autocast_fn, autocast_enabled = setup_autocast(args.precision)
     
-    # Изменяем параметры генерации - убираем проблемные параметры
     generation_params = {
         "max_length": args.max_length,
         "num_beams": args.num_beams,
         "early_stopping": True,
         "temperature": args.temperature,
         "repetition_penalty": args.repetition_penalty,
-        # Убираем эти параметры, которые могут вызывать ошибку
         # "return_dict_in_generate": True, 
         # "output_scores": True
     }
