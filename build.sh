@@ -1,3 +1,5 @@
+#!/bin/bash
+
 TAG=
 RUN_PREFIX=
 BUILD_MODELS=()
@@ -11,6 +13,35 @@ DOCKERFILE=${SOURCE_DIR}/docker/Dockerfile
 BASE_IMAGE=nvcr.io/nvidia/tritonserver
 BASE_IMAGE_TAG_OCR=25.05-py3
 
+stop_containers() {
+    local image_name=$1
+    echo "Checking for running containers using image: $image_name"
+    
+    local running_containers=$(docker ps -q --filter ancestor="$image_name")
+    if [ ! -z "$running_containers" ]; then
+        echo "Stopping running containers..."
+        $RUN_PREFIX docker stop $running_containers
+        echo "Containers stopped successfully"
+    else
+        echo "No running containers found for image: $image_name"
+    fi
+    
+    local container_name="tritonserver"
+    local existing_container=$(docker ps -aq --filter name="$container_name")
+    if [ ! -z "$existing_container" ]; then
+        echo "Stopping and removing container: $container_name"
+        $RUN_PREFIX docker stop "$container_name" 2>/dev/null || true
+        $RUN_PREFIX docker rm "$container_name" 2>/dev/null || true
+    fi
+}
+
+cleanup_backend_files() {
+    echo "Cleaning up backend files..."
+    $RUN_PREFIX rm -rf $PWD/backend/python/*
+    $RUN_PREFIX rm -rf $PWD/backend/donut/*
+    $RUN_PREFIX rm -rf $PWD/backend/yolo/*
+}
+
 get_options() {
     while :; do
         case $1 in
@@ -18,7 +49,7 @@ get_options() {
             show_help
             exit
             ;;
-    --framework)
+        --framework)
             if [ "$2" ]; then
                 FRAMEWORK=$2
                 shift
@@ -26,12 +57,12 @@ get_options() {
                 error 'ERROR: "--framework" requires an argument.'
             fi
             ;;
-    --build-models)
-        if [ "$2" ]; then
+        --build-models)
+            if [ "$2" ]; then
                 BUILD_MODELS+=("$2")
                 shift
             else
-        BUILD_MODELS+=("all")
+                BUILD_MODELS+=("all")
             fi
             ;;
         --base)
@@ -42,7 +73,7 @@ get_options() {
                 error 'ERROR: "--base" requires an argument.'
             fi
             ;;
-    --base-image-tag)
+        --base-image-tag)
             if [ "$2" ]; then
                 BASE_IMAGE_TAG=$2
                 shift
@@ -74,18 +105,21 @@ get_options() {
             echo "=============================="
             echo ""
             ;;
-    --no-cache)
-        NO_CACHE=" --no-cache"
+        --no-cache)
+            NO_CACHE=" --no-cache"
+            ;;
+        --force-cleanup)
+            FORCE_CLEANUP=1
             ;;
         --)
             shift
             break
             ;;
-         -?*)
-        error 'ERROR: Unknown option: ' $1
+        -?*)
+            error 'ERROR: Unknown option: ' $1
             ;;
-     ?*)
-        error 'ERROR: Unknown option: ' $1
+        ?*)
+            error 'ERROR: Unknown option: ' $1
             ;;
         *)
             break
@@ -96,31 +130,28 @@ get_options() {
     done
 
     if [ -z "$FRAMEWORK" ]; then
-    FRAMEWORK=$DEFAULT_FRAMEWORK
+        FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
     if [ ! -z "$FRAMEWORK" ]; then
-    FRAMEWORK=${FRAMEWORK^^}
-    if [[ ! -n "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
-        error 'ERROR: Unknown framework: ' $FRAMEWORK
-    fi
-    if [ -z $BASE_IMAGE_TAG ]; then
-        BASE_IMAGE_TAG=BASE_IMAGE_TAG_${FRAMEWORK}
-        BASE_IMAGE_TAG=${!BASE_IMAGE_TAG}
-    fi
+        FRAMEWORK=${FRAMEWORK^^}
+        if [[ ! -n "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
+            error 'ERROR: Unknown framework: ' $FRAMEWORK
+        fi
+        if [ -z $BASE_IMAGE_TAG ]; then
+            BASE_IMAGE_TAG=BASE_IMAGE_TAG_${FRAMEWORK}
+            BASE_IMAGE_TAG=${!BASE_IMAGE_TAG}
+        fi
     fi
 
     if [ -z "$TAG" ]; then
         TAG="tritonserver:25.05-py3"
 
-    if [[ $FRAMEWORK == "OCR" ]]; then
-        TAG+="-ocr"
+        if [[ $FRAMEWORK == "OCR" ]]; then
+            TAG+="-ocr"
+        fi
     fi
-
-    fi
-
 }
-
 
 show_image_options() {
     echo ""
@@ -138,11 +169,13 @@ show_image_options() {
 show_help() {
     echo "usage: build.sh"
     echo "  [--base base image]"
-    echo "  [--base-imge-tag base image tag]"
+    echo "  [--base-image-tag base image tag]"
     echo "  [--framework framework one of ${!FRAMEWORKS[@]}]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--tag tag for image]"
     echo "  [--dry-run print docker commands without running]"
+    echo "  [--force-cleanup force cleanup of backend files before build]"
+    echo "  [--no-cache build without cache]"
     exit 0
 }
 
@@ -163,6 +196,12 @@ if [ ! -z ${HF_TOKEN} ]; then
     BUILD_ARGS+=" --build-arg HF_TOKEN=${HF_TOKEN} "
 fi
 
+stop_containers "$TAG"
+
+if [ "$FORCE_CLEANUP" = "1" ]; then
+    cleanup_backend_files
+fi
+
 show_image_options
 
 if [ -z "$RUN_PREFIX" ]; then
@@ -175,12 +214,14 @@ $RUN_PREFIX docker build -f $DOCKERFILE $BUILD_OPTIONS $BUILD_ARGS -t $TAG $SOUR
 
 if [[ $FRAMEWORK == OCR ]]; then
     if [ -z "$RUN_PREFIX" ]; then
-    set -x
+        set -x
     fi
     
     $RUN_PREFIX mkdir -p $PWD/backend/python
     $RUN_PREFIX mkdir -p $PWD/backend/donut
     $RUN_PREFIX mkdir -p $PWD/backend/yolo
+
+    stop_containers "$TAG"
 
     $RUN_PREFIX docker run --rm -it -v ${SOURCE_DIR}:/workspace $TAG /bin/bash -c "cp -r /opt/tritonserver/backends/python/* /workspace/backend/python/"
 
@@ -188,12 +229,12 @@ if [[ $FRAMEWORK == OCR ]]; then
 
     for model in "${BUILD_MODELS[@]}"
     do
-    if [ -z "$RUN_PREFIX" ]; then
-        set -x
-    fi
+        if [ -z "$RUN_PREFIX" ]; then
+            set -x
+        fi
 
-    $RUN_PREFIX docker run --rm -it -v ${SOURCE_DIR}:/workspace $TAG /bin/bash -c "/workspace/scripts/build_models.sh"
+        $RUN_PREFIX docker run --rm -it -v ${SOURCE_DIR}:/workspace $TAG /bin/bash -c "/workspace/scripts/build_models.sh"
 
-    { set +x; } 2>/dev/null
+        { set +x; } 2>/dev/null
     done
 fi
