@@ -290,4 +290,5 @@ pm2 logs
 
 ---
 
-
+**🔗 Связанные проекты:**
+- [FrameReader Train](https://github.com/Prischli-Drink-Coffee/FrameReader/tree/train) - Обучение моделей
