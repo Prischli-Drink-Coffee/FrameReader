@@ -18,9 +18,13 @@
 - **Docker** >= 20.10
 - **NVIDIA Docker Runtime** (для GPU поддержки)
 - **Linux/WSL2** (рекомендуется Ubuntu 24.04+)
-- **WeightsModels** ([ссылка на веса моделей]())
+- **WeightsModels** ([ссылка на веса моделей](https://github.com/Prischli-Drink-Coffee/FrameReader/tree/train))
 
-*Модели в формате tensorrt, если проблем с yolo не будет, достаточно конвертировать через model.export(dormat="engine"), то donut может не завестись, код обучения в этой [ветке](), там есть конвертор в tensorrt, по вопросам создавайте issues*
+```
+Веса необходимо поместить по пути *./models/{donut|yolo}/1*
+```
+
+*Модели в формате tensorrt, если проблем с yolo не будет, достаточно конвертировать через model.export(dormat="engine"), то donut может не завестись, код обучения в этой [ветке](https://drive.google.com/drive/folders/15ujiDLGJ-_BtJrISSBLypJY3FtRFLTL2?usp=sharing), там есть конвертор в tensorrt, по вопросам создавайте issues*
 
 ---
 
@@ -144,8 +148,10 @@ docker rm tritonserver
 │       └── model.py
 ├── models/
 │   ├── donut/
+│   │   ├── 1/
 │   │   └── config.pbtxt
 │   └── yolo/
+│   │   ├── 1/
 │       └── config.pbtxt
 ├── docker/
 ├── scripts/
