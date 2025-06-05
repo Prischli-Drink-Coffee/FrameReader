@@ -5,7 +5,7 @@ from fastapi.security import HTTPBearer
 import jwt
 import hashlib
 import secrets
-from settings import Settings
+from src.jwt_cookie.settings import Settings
 from src.utils.custom_logging import setup_logging
 
 log = setup_logging()

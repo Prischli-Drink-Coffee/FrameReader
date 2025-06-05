@@ -10,8 +10,8 @@ from src.utils.env import Env
 env = Env()
 
 
-ACCESS_TOKEN_EXPIRE_MINUTES = int(config.__getattr__("ACCESS_TOKEN_EXPIRE_MINUTES"))
-REFRESH_TOKEN_EXPIRE_DAYS = int(config.__getattr__("REFRESH_TOKEN_EXPIRE_DAYS"))
+ACCESS_TOKEN_EXPIRE_MINUTES = int(env.__getattr__("ACCESS_TOKEN_EXPIRE_MINUTES"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(env.__getattr__("REFRESH_TOKEN_EXPIRE_DAYS"))
 
 
 class AuthJWT(BaseModel):

@@ -1,8 +1,9 @@
 from src.jwt_cookie.session_manager import JWTCookieManager
-from src.fingerprint_collector import FingerprintCollector
+from src.jwt_cookie.session_manager import FingerprintCollector
 from fastapi import Request, HTTPException, status, Response
 from src.services import user_services, user_sessions_services
 from src.database.models import UserSessions
+from typing import Dict
 
 
 class UserSessionManager:

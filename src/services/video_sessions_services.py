@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from src.repository import video_sessions_repository
-from src.database.models import VideoSessions, ProcessingStatus
+from src.database.models import VideoSessions, ProcessingStatusEnum
 from fastapi import HTTPException, status
 from src.utils.custom_logging import setup_logging
 
@@ -28,12 +28,12 @@ def get_video_sessions_by_user(user_id: int) -> List[VideoSessions]:
     return [VideoSessions(**session) for session in sessions]
 
 
-def get_video_sessions_by_status(processing_status: ProcessingStatus) -> List[VideoSessions]:
+def get_video_sessions_by_status(processing_status: ProcessingStatusEnum) -> List[VideoSessions]:
     sessions = video_sessions_repository.get_video_sessions_by_status(processing_status)
     return [VideoSessions(**session) for session in sessions]
 
 
-def get_video_sessions_by_user_and_status(user_id: int, processing_status: ProcessingStatus) -> List[VideoSessions]:
+def get_video_sessions_by_user_and_status(user_id: int, processing_status: ProcessingStatusEnum) -> List[VideoSessions]:
     sessions = video_sessions_repository.get_video_sessions_by_user_and_status(user_id, processing_status)
     return [VideoSessions(**session) for session in sessions]
 
@@ -47,7 +47,7 @@ def create_video_session(user_id: int, video_url: str) -> VideoSessions:
     session = VideoSessions(
         UserID=user_id,
         VideoURL=video_url,
-        ProcessingStatus=ProcessingStatus.PROCESSING,
+        ProcessingStatus=ProcessingStatusEnum.PROCESSING,
         StartedAt=datetime.utcnow()
     )
     
@@ -60,7 +60,7 @@ def update_video_session_fields(session_id: int, updates: Dict[str, Any]) -> Dic
     
     allowed_fields = {
         "video_url": str,
-        "processing_status": ProcessingStatus,
+        "processing_status": ProcessingStatusEnum,
         "started_at": datetime,
         "completed_at": datetime
     }
@@ -83,7 +83,7 @@ def update_video_session_fields(session_id: int, updates: Dict[str, Any]) -> Dic
     return {"message": "Video session updated successfully"}
 
 
-def update_session_status(session_id: int, status: ProcessingStatus, completed_at: Optional[datetime] = None) -> Dict[str, str]:
+def update_session_status(session_id: int, status: ProcessingStatusEnum, completed_at: Optional[datetime] = None) -> Dict[str, str]:
     get_video_session_by_id(session_id)
     video_sessions_repository.update_session_status(session_id, status, completed_at)
     return {"message": f"Session status updated to {status.value}"}
@@ -92,7 +92,7 @@ def update_session_status(session_id: int, status: ProcessingStatus, completed_a
 def complete_video_session(session_id: int) -> Dict[str, str]:
     session = get_video_session_by_id(session_id)
     
-    if session.ProcessingStatus == ProcessingStatus.COMPLETED:
+    if session.ProcessingStatusEnum == ProcessingStatusEnum.COMPLETED:
         return {"message": "Session already completed"}
     
     video_sessions_repository.complete_video_session(session_id)
@@ -106,7 +106,7 @@ def complete_video_session(session_id: int) -> Dict[str, str]:
 def fail_video_session(session_id: int, error_message: Optional[str] = None) -> Dict[str, str]:
     session = get_video_session_by_id(session_id)
     
-    if session.ProcessingStatus == ProcessingStatus.FAILED:
+    if session.ProcessingStatusEnum == ProcessingStatusEnum.FAILED:
         return {"message": "Session already marked as failed"}
     
     video_sessions_repository.fail_video_session(session_id)
@@ -130,9 +130,9 @@ def get_user_video_history(user_id: int, limit: int = 10) -> List[VideoSessions]
 def get_user_session_statistics(user_id: int) -> Dict[str, Any]:
     total_count = video_sessions_repository.get_user_session_count(user_id)
     
-    processing_sessions = get_video_sessions_by_user_and_status(user_id, ProcessingStatus.PROCESSING)
-    completed_sessions = get_video_sessions_by_user_and_status(user_id, ProcessingStatus.COMPLETED)
-    failed_sessions = get_video_sessions_by_user_and_status(user_id, ProcessingStatus.FAILED)
+    processing_sessions = get_video_sessions_by_user_and_status(user_id, ProcessingStatusEnum.PROCESSING)
+    completed_sessions = get_video_sessions_by_user_and_status(user_id, ProcessingStatusEnum.COMPLETED)
+    failed_sessions = get_video_sessions_by_user_and_status(user_id, ProcessingStatusEnum.FAILED)
     
     return {
         "user_id": user_id,
@@ -159,7 +159,7 @@ def cleanup_old_failed_sessions(days_old: int = 30) -> Dict[str, Any]:
     cutoff_date = datetime.utcnow() - timedelta(days=days_old)
     
     old_failed_sessions = [
-        session for session in get_video_sessions_by_status(ProcessingStatus.FAILED)
+        session for session in get_video_sessions_by_status(ProcessingStatusEnum.FAILED)
         if session.StartedAt and session.StartedAt < cutoff_date
     ]
     

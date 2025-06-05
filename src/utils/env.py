@@ -8,7 +8,7 @@ log = setup_logging()
 class Env:
 
     def __init__(self):
-        load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
+        load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), ".env"))
 
     def __str__(self):
         env_vars = {k: v for k, v in os.environ.items() if not k.startswith('_')}

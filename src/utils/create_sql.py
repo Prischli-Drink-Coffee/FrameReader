@@ -10,7 +10,7 @@ log = setup_logging()
 class CreateSQL:
 
     def __init__(self):
-        self.path_to_sql = os.path.join(os.path.dirname(__file__), f"{env.__getattr__('DB')}.sql")
+        self.path_to_sql = os.path.join(os.path.dirname(os.path.dirname(__file__)), f"{env.__getattr__('DB')}.sql")
 
         self.connection = pymysql.connect(
             host=env.__getattr__("DB_HOST"),

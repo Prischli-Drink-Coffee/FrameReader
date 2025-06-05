@@ -1,7 +1,7 @@
 from typing import Optional, Dict, Any, List
 from datetime import datetime
 from src.database.my_connector import db
-from src.database.models import VideoSessions, ProcessingStatus
+from src.database.models import VideoSessions, ProcessingStatusEnum
 
 
 def get_all_video_sessions() -> List[Dict[str, Any]]:
@@ -19,12 +19,12 @@ def get_video_sessions_by_user(user_id: int) -> List[Dict[str, Any]]:
     return db.fetch_all(query, (user_id,))
 
 
-def get_video_sessions_by_status(status: ProcessingStatus) -> List[Dict[str, Any]]:
+def get_video_sessions_by_status(status: ProcessingStatusEnum) -> List[Dict[str, Any]]:
     query = "SELECT * FROM video_sessions WHERE processing_status = %s"
     return db.fetch_all(query, (status.value,))
 
 
-def get_video_sessions_by_user_and_status(user_id: int, status: ProcessingStatus) -> List[Dict[str, Any]]:
+def get_video_sessions_by_user_and_status(user_id: int, status: ProcessingStatusEnum) -> List[Dict[str, Any]]:
     query = "SELECT * FROM video_sessions WHERE user_id = %s AND processing_status = %s ORDER BY started_at DESC"
     return db.fetch_all(query, (user_id, status.value))
 
@@ -42,7 +42,7 @@ def create_video_session(session: VideoSessions) -> int:
     params = (
         session.UserID,
         session.VideoURL,
-        session.ProcessingStatus.value,
+        session.ProcessingStatusEnum.value,
         session.StartedAt or datetime.utcnow()
     )
     cursor = db.execute_query(query, params)
@@ -76,8 +76,8 @@ def update_video_session(session_id: int, updates: Dict[str, Any]) -> None:
     db.execute_query(query, params)
 
 
-def update_session_status(session_id: int, status: ProcessingStatus, completed_at: Optional[datetime] = None) -> None:
-    if status == ProcessingStatus.COMPLETED and completed_at is None:
+def update_session_status(session_id: int, status: ProcessingStatusEnum, completed_at: Optional[datetime] = None) -> None:
+    if status == ProcessingStatusEnum.COMPLETED and completed_at is None:
         completed_at = datetime.utcnow()
     
     if completed_at:

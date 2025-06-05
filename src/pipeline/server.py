@@ -9,21 +9,22 @@ from src.utils.env import Env
 from src import path_to_project
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from fastapi import Query
+from fastapi import Query, Form
 from decimal import Decimal
 
 from typing import Dict
 from fastapi import Request, Response, Depends
-from src.jwt_cookie.session_manager import session_manager
+from src.services.cookie_services import session_manager
 
 from src.database.models import (
     Users,
     UserSessions,
     VideoSessions,
-    FrameAnnotations
+    FrameAnnotations,
+    ProcessingStatusEnum
 )
 from src.services import (
-    coockie_services,
+    cookie_services,
     frame_annotations_services,
     user_services,
     user_sessions_services,
@@ -36,8 +37,10 @@ log = setup_logging()
 
 app = FastAPI()
 
-app_server = FastAPI(title="FrameReader Server API", version="1.0.0",
-                     description="This API server is intended for the FrameReader project. For rights, contact the service owner (dfvolkhin@edu.hse.ru).")
+app_server = FastAPI(title="FrameReader Server API",
+                     version="1.0.0",
+                     description="This API server is intended for the FrameReader project. For rights, \
+                                  contact the service owner (dfvolkhin@edu.hse.ru).")
 
 app.mount("/server", app_server)
 # app.mount("/public", app_public)
@@ -1039,6 +1042,346 @@ async def get_annotations_summary_by_content_type(video_session_id: int):
         raise ex
 
 
+@app_server.get("/video-sessions/", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_all_video_sessions():
+    """
+    Route for get all video sessions from database.
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_all_video_sessions()
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/{session_id}", response_model=VideoSessions, tags=["VideoSessions"])
+async def get_video_session_by_id(session_id: int):
+    """
+    Route for get video session by ID.
+
+    :param session_id: ID by video session. [int]
+
+    :return: response model VideoSessions.
+    """
+    try:
+        return video_sessions_services.get_video_session_by_id(session_id)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/user/{user_id}", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_video_sessions_by_user(user_id: int):
+    """
+    Route for get all video sessions by user ID.
+
+    :param user_id: ID by user. [int]
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_video_sessions_by_user(user_id)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/status/{status}", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_video_sessions_by_status(status: ProcessingStatusEnum):
+    """
+    Route for get video sessions by processing status.
+
+    :param status: Processing status. [ProcessingStatusEnum]
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_video_sessions_by_status(status)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/user/{user_id}/status/{status}", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_video_sessions_by_user_and_status(user_id: int, status: ProcessingStatusEnum):
+    """
+    Route for get video sessions by user ID and status.
+
+    :param user_id: ID by user. [int]
+    :param status: Processing status. [ProcessingStatusEnum]
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_video_sessions_by_user_and_status(user_id, status)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/processing/", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_processing_sessions():
+    """
+    Route for get all processing video sessions.
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_processing_sessions()
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.post("/video-sessions/", response_model=VideoSessions, tags=["VideoSessions"])
+async def create_video_session(
+    user_id: int = Form(...),
+    video_url: str = Form(...)
+):
+    """
+    Route for create video session.
+
+    :param user_id: ID by user. [int]
+    :param video_url: URL of video to process. [str]
+
+    :return: response model VideoSessions.
+    """
+    try:
+        return video_sessions_services.create_video_session(user_id, video_url)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.patch("/video-sessions/{session_id}", response_model=Dict[str, str], tags=["VideoSessions"])
+async def update_video_session_fields(session_id: int, updates: Dict[str, Any]):
+    """
+    Route for update video session fields.
+
+    :param session_id: ID by video session. [int]
+    :param updates: Fields to update. [Dict[str, Any]]
+
+    :return: response model dict.
+    """
+    try:
+        return video_sessions_services.update_video_session_fields(session_id, updates)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.patch("/video-sessions/{session_id}/status", response_model=Dict[str, str], tags=["VideoSessions"])
+async def update_session_status(
+    session_id: int,
+    status: ProcessingStatusEnum,
+    completed_at: Optional[datetime] = None
+):
+    """
+    Route for update video session status.
+
+    :param session_id: ID by video session. [int]
+    :param status: New processing status. [ProcessingStatusEnum]
+    :param completed_at: Completion timestamp. [datetime]
+
+    :return: response model dict.
+    """
+    try:
+        return video_sessions_services.update_session_status(session_id, status, completed_at)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.patch("/video-sessions/{session_id}/complete", response_model=Dict[str, str], tags=["VideoSessions"])
+async def complete_video_session(session_id: int):
+    """
+    Route for complete video session.
+
+    :param session_id: ID by video session. [int]
+
+    :return: response model dict.
+    """
+    try:
+        return video_sessions_services.complete_video_session(session_id)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.patch("/video-sessions/{session_id}/fail", response_model=Dict[str, str], tags=["VideoSessions"])
+async def fail_video_session(session_id: int, error_message: Optional[str] = None):
+    """
+    Route for mark video session as failed.
+
+    :param session_id: ID by video session. [int]
+    :param error_message: Error message. [str]
+
+    :return: response model dict.
+    """
+    try:
+        return video_sessions_services.fail_video_session(session_id, error_message)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.delete("/video-sessions/{session_id}", response_model=Dict[str, str], tags=["VideoSessions"])
+async def delete_video_session(session_id: int):
+    """
+    Route for delete video session.
+
+    :param session_id: ID by video session. [int]
+
+    :return: response model dict.
+    """
+    try:
+        return video_sessions_services.delete_video_session(session_id)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/user/{user_id}/count", response_model=int, tags=["VideoSessions"])
+async def get_user_session_count(user_id: int):
+    """
+    Route for get user video session count.
+
+    :param user_id: ID by user. [int]
+
+    :return: response model int.
+    """
+    try:
+        return video_sessions_services.get_user_session_count(user_id)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/date-range/", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_sessions_by_date_range(
+    start_date: datetime = Query(..., description="Start date for range"),
+    end_date: datetime = Query(..., description="End date for range")
+):
+    """
+    Route for get video sessions by date range.
+
+    :param start_date: Start date for filtering. [datetime]
+    :param end_date: End date for filtering. [datetime]
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_sessions_by_date_range(start_date, end_date)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/user/{user_id}/completed", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_completed_sessions_by_user(
+    user_id: int,
+    limit: int = Query(10, description="Number of sessions to retrieve")
+):
+    """
+    Route for get completed video sessions by user.
+
+    :param user_id: ID by user. [int]
+    :param limit: Number of sessions to retrieve. [int]
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_user_video_history(user_id, limit)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/user/{user_id}/statistics", response_model=Dict[str, Any], tags=["VideoSessions"])
+async def get_user_session_statistics(user_id: int):
+    """
+    Route for get user video session statistics.
+
+    :param user_id: ID by user. [int]
+
+    :return: response model dict with statistics.
+    """
+    try:
+        return video_sessions_services.get_user_session_statistics(user_id)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/recent/", response_model=List[VideoSessions], tags=["VideoSessions"])
+async def get_recent_sessions(
+    days: int = Query(7, description="Number of days to look back")
+):
+    """
+    Route for get recent video sessions.
+
+    :param days: Number of days to look back. [int]
+
+    :return: response model List[VideoSessions].
+    """
+    try:
+        return video_sessions_services.get_recent_sessions(days)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.delete("/video-sessions/cleanup/failed", response_model=Dict[str, Any], tags=["VideoSessions"])
+async def cleanup_old_failed_sessions(
+    days_old: int = Query(30, description="Number of days to consider sessions as old")
+):
+    """
+    Route for cleanup old failed video sessions.
+
+    :param days_old: Number of days to consider old. [int]
+
+    :return: response model dict with cleanup results.
+    """
+    try:
+        return video_sessions_services.cleanup_old_failed_sessions(days_old)
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/{session_id}/duration", response_model=Optional[float], tags=["VideoSessions"])
+async def get_session_duration(session_id: int):
+    """
+    Route for get video session duration in seconds.
+
+    :param session_id: ID by video session. [int]
+
+    :return: response model float or None.
+    """
+    try:
+        duration = video_sessions_services.get_session_duration(session_id)
+        return duration.total_seconds() if duration else None
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
+@app_server.get("/video-sessions/queue/status", response_model=Dict[str, Any], tags=["VideoSessions"])
+async def get_processing_queue_status():
+    """
+    Route for get processing queue status.
+
+    :return: response model dict with queue information.
+    """
+    try:
+        return video_sessions_services.get_processing_queue_status()
+    except HTTPException as ex:
+        log.exception(f"Error", exc_info=ex)
+        raise ex
+
+
 
 def run_server():
     import logging
@@ -1055,16 +1398,10 @@ def run_server():
         reload = False
     else:
         raise Exception("Not init debug mode in env file")
-    uvicorn.run("server:app", host=env.__getattr__("HOST"), port=int(env.__getattr__("SERVER_PORT")),
+    uvicorn.run("src.pipeline.server:app", host=env.__getattr__("HOST"), port=int(env.__getattr__("SERVER_PORT")),
                 log_config=uvicorn_log_config, reload=reload)
 
 
 if __name__ == "__main__":
-    log.info("Start create/update database")
-    from create_sql import CreateSQL
-
-    create_sql = CreateSQL()
-    create_sql.read_sql()
-
     log.info("Start run server")
     run_server()

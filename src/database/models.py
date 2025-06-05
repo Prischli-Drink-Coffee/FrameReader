@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 
-class ProcessingStatus(str, Enum):
+class ProcessingStatusEnum(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -78,7 +78,7 @@ class VideoSessions(BaseModel):
     VideoURL: StrictStr = Field(...,
                                 alias="video_url",
                                 examples=["https://rutube.ru/video/98a85192e297ff4db1860f43ff7a2738/"])
-    ProcessingStatus: ProcessingStatus = Field(default=ProcessingStatus.PROCESSING,
+    ProcessingStatus: ProcessingStatusEnum = Field(default=ProcessingStatusEnum.PROCESSING,
                                                alias="processing_status",
                                                examples=["processing"])
     StartedAt: Optional[datetime] = Field(None,
