@@ -1,0 +1,40 @@
+users [icon: user, color: blue] {
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY
+  fingerprint_hash VARCHAR(64) UNIQUE NOT NULL
+  first_visit TIMESTAMP NOT NULL
+  last_activity TIMESTAMP NOT NULL
+  total_sessions INT NOT NULL DEFAULT 0
+  total_videos_processed INT NOT NULL DEFAULT 0
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+}
+
+user_sessions [icon: key, color: green] {
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY
+  user_id INT NOT NULL
+  jwt_token_hash VARCHAR(64) UNIQUE NOT NULL
+  expires_at TIMESTAMP NOT NULL
+  user_agent TEXT NULL
+  ip_address VARCHAR(45) NULL
+  is_active BOOLEAN NOT NULL DEFAULT TRUE
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+}
+user_sessions.user_id > users.id
+
+video_sessions [icon: video, color: purple] {
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY
+  user_id INT NOT NULL
+  video_url TEXT NOT NULL
+  processing_status ENUM('completed', 'failed', 'processing') NOT NULL DEFAULT 'processing'
+  started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  completed_at TIMESTAMP NULL
+}
+video_sessions.user_id > users.id
+
+frame_annotations [icon: tag, color: orange] {
+  id INT NOT NULL AUTO_INCREMENT PRIMARY KEY
+  video_session_id INT NOT NULL
+  frame_timestamp DECIMAL(10,3) NOT NULL
+  annotation_data JSON NOT NULL
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+}
+frame_annotations.video_session_id > video_sessions.id

@@ -9,10 +9,8 @@ class ConfigParser:
         if not path.exists(file):
             raise Exception(f'File "{file}" not exists')
         try:
-            # Открываем файл с указанием кодировки 'latin1'
             with codecs.open(file, mode="r", encoding="latin1") as config_file:
                 raw_data = config_file.read()
-                # Перекодируем текст в UTF-8
                 decoded_data = raw_data.encode('latin1').decode('utf-8')
                 config = yaml.load(decoded_data, Loader=yaml.SafeLoader)
         except Exception as config_parse_exception:

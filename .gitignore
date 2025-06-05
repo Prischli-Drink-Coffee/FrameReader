@@ -344,3 +344,10 @@ cython_debug/
 
 /.idea/
 /files/
+
+
+/public/
+/src/certs/
+/src/FrameReader/__pycache__/
+/src/keys/jwt-private.pem
+/src/keys/jwt-public.pem
