@@ -46,7 +46,6 @@ class StreamEndpointClient:
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"Image file not found: {path}")
-        
         if not path.suffix.lower() in {'.jpg', '.jpeg', '.png', '.bmp', '.tiff'}:
             raise ValueError(f"Unsupported image format: {path.suffix}")
         
@@ -55,24 +54,18 @@ class StreamEndpointClient:
     def _validate_numpy_array(self, array: np.ndarray) -> np.ndarray:
         if not isinstance(array, np.ndarray):
             raise TypeError("Input must be a numpy.ndarray")
-        
         if array.ndim not in [2, 3]:
             raise ValueError("Array must be 2D (grayscale) or 3D (color)")
-        
         if array.ndim == 3 and array.shape[2] not in [1, 3, 4]:
             raise ValueError("Color images must have 1, 3, or 4 channels")
-        
         if array.dtype not in [np.uint8, np.float32, np.float64]:
             array = array.astype(np.uint8)
-        
         if array.max() <= 1.0 and array.dtype in [np.float32, np.float64]:
             array = (array * 255).astype(np.uint8)
-        
         return array
 
     def _numpy_to_bytes(self, array: np.ndarray, format: str = 'JPEG') -> bytes:
         validated_array = self._validate_numpy_array(array)
-        
         if validated_array.ndim == 2:
             img = Image.fromarray(validated_array, mode='L')
         elif validated_array.shape[2] == 1:
@@ -83,7 +76,6 @@ class StreamEndpointClient:
             img = Image.fromarray(validated_array, mode='RGBA')
         else:
             raise ValueError(f"Unsupported array shape: {validated_array.shape}")
-        
         buffer = BytesIO()
         img.save(buffer, format=format)
         return buffer.getvalue()
@@ -104,30 +96,23 @@ class StreamEndpointClient:
         for idx, image_path in enumerate(image_paths):
             try:
                 validated_path = self._validate_image_file(image_path)
-                
                 async with aiofiles.open(validated_path, 'rb') as f:
                     content = await f.read()
-                
                 if not content:
                     raise ValueError(f"Empty image file: {validated_path}")
-                
                 try:
                     img = Image.open(BytesIO(content))
                     img.verify()
                 except Exception as e:
                     raise ValueError(f"Invalid image content in {validated_path}: {e}")
-                
                 files.append((
                     'images',
                     (validated_path.name, content, 'image/jpeg')
                 ))
-                
                 log.debug(f"Prepared streaming image {idx + 1}/{len(image_paths)}: {validated_path.name}")
-                
             except Exception as e:
                 log.error(f"Failed to prepare image {image_path}: {e}")
                 raise
-
         return files
 
     async def _prepare_image_files_from_arrays(
@@ -139,39 +124,30 @@ class StreamEndpointClient:
         
         if filenames and len(filenames) != len(image_arrays):
             raise ValueError("Number of filenames must match number of arrays")
-        
         for idx, array in enumerate(image_arrays):
             try:
                 content = self._numpy_to_bytes(array)
-                
                 if not content:
                     raise ValueError(f"Empty content from numpy array {idx}")
-                
                 try:
                     img = Image.open(BytesIO(content))
                     img.verify()
                 except Exception as e:
                     raise ValueError(f"Invalid converted image content from array {idx}: {e}")
-                
                 filename = (filenames[idx] if filenames 
                            else f"stream_array_{idx + 1}.jpg")
-                
                 files.append((
                     'images',
                     (filename, content, 'image/jpeg')
                 ))
-                
                 log.debug(f"Prepared streaming array {idx + 1}/{len(image_arrays)}: {filename}")
-                
             except Exception as e:
                 log.error(f"Failed to prepare numpy array {idx}: {e}")
                 raise
-
         return files
 
     async def _parse_sse_event(self, line: str) -> Optional[Dict[str, Any]]:
         line = line.strip()
-        
         if line.startswith('event:'):
             return {'type': 'event', 'value': line[6:].strip()}
         elif line.startswith('data:'):
@@ -183,7 +159,6 @@ class StreamEndpointClient:
                 return {'type': 'data', 'value': data_str}
         elif line == '':
             return {'type': 'separator'}
-        
         return None
 
     async def _stream_request(
@@ -196,11 +171,8 @@ class StreamEndpointClient:
             raise RuntimeError("Client not initialized. Use async context manager.")
 
         validated_chunk_size = self._validate_chunk_size(chunk_size)
-        
         data = {'chunk_size': str(validated_chunk_size)}
-        
         log.info(f"Starting streaming request to {endpoint} with chunk_size={validated_chunk_size}")
-        
         try:
             async with self._client.stream(
                 'POST',
@@ -210,16 +182,12 @@ class StreamEndpointClient:
                 headers={'Accept': 'text/event-stream'}
             ) as response:
                 response.raise_for_status()
-                
                 current_event = None
                 current_data = None
-                
                 async for line in response.aiter_lines():
                     parsed = await self._parse_sse_event(line)
-                    
                     if not parsed:
                         continue
-                    
                     if parsed['type'] == 'event':
                         current_event = parsed['value']
                     elif parsed['type'] == 'data':
@@ -231,7 +199,6 @@ class StreamEndpointClient:
                         }
                         current_event = None
                         current_data = None
-                        
         except httpx.HTTPStatusError as e:
             log.error(f"HTTP error {e.response.status_code} for {endpoint}: {e.response.text}")
             raise
@@ -249,9 +216,7 @@ class StreamEndpointClient:
         
         chunk_size = chunk_size or self.chunk_size
         log.info(f"Starting YOLO streaming for {len(image_paths)} paths with chunk_size={chunk_size}")
-        
         files = await self._prepare_image_files_from_paths(image_paths)
-        
         async for event in self._stream_request('/stream/yolo', files, chunk_size):
             log.debug(f"YOLO stream event: {event['event']}")
             yield event
@@ -267,9 +232,7 @@ class StreamEndpointClient:
         
         chunk_size = chunk_size or self.chunk_size
         log.info(f"Starting YOLO streaming for {len(image_arrays)} arrays with chunk_size={chunk_size}")
-        
         files = await self._prepare_image_files_from_arrays(image_arrays, filenames)
-        
         async for event in self._stream_request('/stream/yolo', files, chunk_size):
             log.debug(f"YOLO stream event: {event['event']}")
             yield event
@@ -284,9 +247,7 @@ class StreamEndpointClient:
         
         chunk_size = chunk_size or self.chunk_size
         log.info(f"Starting Donut streaming for {len(image_paths)} paths with chunk_size={chunk_size}")
-        
         files = await self._prepare_image_files_from_paths(image_paths)
-        
         async for event in self._stream_request('/stream/donut', files, chunk_size):
             log.debug(f"Donut stream event: {event['event']}")
             yield event
@@ -302,9 +263,7 @@ class StreamEndpointClient:
         
         chunk_size = chunk_size or self.chunk_size
         log.info(f"Starting Donut streaming for {len(image_arrays)} arrays with chunk_size={chunk_size}")
-        
         files = await self._prepare_image_files_from_arrays(image_arrays, filenames)
-        
         async for event in self._stream_request('/stream/donut', files, chunk_size):
             log.debug(f"Donut stream event: {event['event']}")
             yield event
@@ -315,15 +274,12 @@ class StreamEndpointClient:
         
         if not self._client:
             raise RuntimeError("Client not initialized. Use async context manager.")
-        
         try:
             response = await self._client.get(f'/stream/status/{model_name}')
             response.raise_for_status()
             result = response.json()
-            
             log.info(f"Stream status for {model_name}: {result.get('ready', False)}")
             return result
-            
         except Exception as e:
             log.error(f"Failed to get stream status for {model_name}: {e}")
             raise
@@ -339,27 +295,21 @@ class StreamEndpointClient:
         async for event in stream_generator:
             event_type = event.get('event')
             event_data = event.get('data', {})
-            
             if event_type == 'start':
                 log.info(f"Stream started: {event_data}")
                 total_processed = event_data.get('total_images', 0)
-                
             elif event_type == 'processing':
                 log.debug(f"Processing chunk: {event_data}")
-                
             elif event_type == 'result':
                 results = event_data.get('results', [])
                 collected_results.extend(results)
                 log.debug(f"Collected {len(results)} results from chunk")
-                
             elif event_type == 'complete':
                 final_status = event_data
                 log.info(f"Stream completed: {event_data}")
-                
             elif event_type == 'error':
                 log.error(f"Stream error: {event_data}")
                 raise RuntimeError(f"Stream failed: {event_data.get('error', 'Unknown error')}")
-        
         return {
             'status': 'success',
             'results': collected_results,
@@ -417,24 +367,19 @@ class StreamEndpointClient:
 
 
 async def example_usage():
-    """
-    Примеры использования StreamEndpointClient с numpy массивами
-    """
+
     from stream_endpoint import StreamEndpointClient
     import numpy as np
     
-    # Создание тестовых numpy массивов
     test_array_1 = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     test_array_2 = np.random.randint(0, 255, (600, 800, 3), dtype=np.uint8)
     test_array_3 = np.random.randint(0, 255, (512, 512, 3), dtype=np.uint8)
     test_arrays = [test_array_1, test_array_2, test_array_3]
     
     async with StreamEndpointClient(chunk_size=2) as client:
-        # Проверка статуса стриминга
         yolo_status = await client.get_stream_status('yolo')
         print(f"YOLO stream status: {yolo_status['ready']}")
         
-        # YOLO стриминг с numpy массивами
         print("Starting YOLO streaming with arrays...")
         async for event in client.yolo_stream_from_arrays(
             test_arrays, 
@@ -445,7 +390,6 @@ async def example_usage():
             if event['event'] == 'result':
                 print(f"  Results count: {len(event['data'].get('results', []))}")
         
-        # Сбор результатов Donut стриминга
         print("Collecting Donut stream results...")
         donut_results = await client.stream_collect_from_arrays(
             test_arrays, 
@@ -453,14 +397,12 @@ async def example_usage():
             chunk_size=1
         )
         print(f"Donut results: {len(donut_results['results'])} items")
-        
-        # Универсальный метод стриминга
+
         print("Universal streaming method...")
         async for event in client.yolo_stream(test_arrays, chunk_size=3):
             if event['event'] == 'complete':
                 print(f"Completed: {event['data']}")
         
-        # Сравнение с массивами float32 (нормализованными)
         float_arrays = [arr.astype(np.float32) / 255.0 for arr in test_arrays]
         print("Streaming with normalized float arrays...")
         float_results = await client.stream_collect_from_arrays(

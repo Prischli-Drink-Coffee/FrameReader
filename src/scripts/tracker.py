@@ -15,15 +15,14 @@ from dataclasses import dataclass, field
 import traceback
 import asyncio
 
+from src.triton_api.main_endpoint import MainEndpointClient 
 from src.triton_api.stream_endpoint import StreamEndpointClient
 from src.triton_api.websocket_endpoint import WebSocketEndpointClient
 
 
 from src.utils.custom_logging import setup_logging
-# from src.utils.env import Env # Если Env нужен для URL по умолчанию в SAHITrackingWrapper
 
 log = setup_logging()
-# env = Env() # Если используется
 
 _colors_list = [
     (0, 255, 0), (0, 0, 255), (255, 0, 0), (255, 255, 0),
@@ -54,7 +53,7 @@ class MockBoxesData: # Остается без изменений
         elif boxes_data_np.shape[0] == 0:
             boxes_data_np = np.empty((0, 6), dtype=np.float32)
 
-        self.data = torch.from_numpy(boxes_data_np).float().cpu() # Keep on CPU for consistency
+        self.data = torch.from_numpy(boxes_data_np).float().cpu()
         self.orig_shape = orig_shape
 
         if self.data.numel() > 0:
@@ -69,25 +68,25 @@ class MockBoxesData: # Остается без изменений
             self.cls = torch.empty(0, dtype=torch.int, device=self.data.device)
             self.xywh = torch.empty((0, 4), device=self.data.device)
 
-    def cpu(self): # Already on CPU
+    def cpu(self):
         return self
 
     def __len__(self):
         return self.data.shape[0]
 
 
-class MockResults: # Остается без изменений
+class MockResults:
     def __init__(self, boxes_data_np: np.ndarray, orig_shape: Tuple[int, int]):
         self.boxes = MockBoxesData(boxes_data_np, orig_shape)
         self.conf = self.boxes.conf
         self.xywh = self.boxes.xywh
         self.cls = self.boxes.cls
-        self.names = {} # This will be populated by SAHITrackingWrapper
+        self.names = {}
         self.masks = None
         self.probs = None
         self.keypoints = None
         self.orig_shape = orig_shape
-        self.orig_img = None # Can be set if needed by tracker
+        self.orig_img = None
 
     def cpu(self):
         self.boxes.cpu()
@@ -108,63 +107,102 @@ class SAHITrackingWrapper:
         overlap_ratio: Tuple[float, float] = (0.2, 0.2),
         img_size: Union[int, Tuple[int,int]] = 640,
         conf_threshold: float = 0.25,
-        iou_threshold: float = 0.45, # For local model NMS before SAHI
-        nms_threshold_global: float = 0.5, # NMS after SAHI, before tracker
+        iou_threshold: float = 0.45,
+        nms_threshold_global: float = 0.5,
         classes: Optional[List[int]] = None,
         device: Optional[Union[str, torch.device]] = None,
-        # Triton integration parameters
-        detection_source: str = "local",  # "local", "triton_stream", "triton_ws"
+        detection_source: str = "local",
         triton_stream_url: Optional[str] = None,
         triton_ws_url: Optional[str] = None,
-        triton_model_name: str = "yolo", # Model name on Triton server
+        triton_batch_url: Optional[str] = None,
+        triton_model_name: str = "yolo",
         triton_chunk_size: int = 1,
-        class_names_map: Optional[Dict[int, str]] = None # e.g. {0: 'person', 1: 'car'}
+        triton_max_batch_size: int = 16,
+        class_names_map: Optional[Dict[int, str]] = None
     ):
         self.detection_source = detection_source
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        log.debug(f"Using device for NMS and potentially local model: {self.device}")
+        self.triton_max_batch_size = triton_max_batch_size
+        
+        log.debug(f"Using device: {self.device}, max_batch_size: {triton_max_batch_size}")
 
         self.model_names: Dict[int, str] = {}
         self.model_names_reverse_map: Dict[str, int] = {}
         
         self.triton_stream_client: Optional[StreamEndpointClient] = None
         self.triton_ws_client: Optional[WebSocketEndpointClient] = None
+        self.triton_batch_client: Optional[MainEndpointClient] = None
 
-        if self.detection_source == "local":
-            if not model_path or not os.path.exists(model_path):
-                raise FileNotFoundError(f"Model file not found or not provided for local detection: {model_path}")
-            log.debug(f"Loading local detection model from {model_path}...")
-            self.model = YOLO(model_path, task='detect')
-            # self.model.to(self.device) # Ensure local model is on the correct device
-            self.model_names = self.model.names
-            log.debug(f"Local detection model loaded. Names: {self.model_names}")
-        elif self.detection_source == "triton_stream":
-            if not triton_stream_url:
-                raise ValueError("Triton stream URL must be provided for triton_stream source.")
-            self.triton_stream_client = StreamEndpointClient(base_url=triton_stream_url, chunk_size=triton_chunk_size)
-            log.debug(f"Using Triton Stream client with URL: {triton_stream_url}")
-            if class_names_map:
-                self.model_names = class_names_map
-        elif self.detection_source == "triton_ws":
-            if not triton_ws_url:
-                raise ValueError("Triton WebSocket URL must be provided for triton_ws source.")
-            self.triton_ws_client = WebSocketEndpointClient(base_url=triton_ws_url)
-            # WebSocket client connection is managed per session in run_inference_session
-            log.debug(f"Using Triton WebSocket client with URL: {triton_ws_url}")
-            if class_names_map:
-                self.model_names = class_names_map
-        else:
-            raise ValueError(f"Unsupported detection_source: {self.detection_source}")
-
-        if not self.model_names and self.detection_source != "local":
-            log.warning("class_names_map not provided for Triton. Class names will be 'Cls_<id>' or based on hash.")
+        self._initialize_detection_source(
+            model_path, triton_stream_url, triton_ws_url, triton_batch_url,
+            triton_chunk_size, class_names_map
+        )
         
-        if self.model_names:
-            self.model_names_reverse_map = {v: k for k, v in self.model_names.items()}
-
         self.triton_model_name = triton_model_name
         self.tracker_type = tracker_type
 
+        self._initialize_tracker(tracker_type, tracker_config_path, frame_rate)
+        
+        self.window_size_ratio = window_size_ratio
+        self.overlap_ratio = overlap_ratio
+        self.img_size = img_size
+        self.conf_threshold = conf_threshold
+        self.iou_threshold = iou_threshold
+        self.nms_threshold_global = nms_threshold_global
+        self.classes = classes
+
+    def _initialize_detection_source(
+        self, 
+        model_path: Optional[str], 
+        triton_stream_url: Optional[str], 
+        triton_ws_url: Optional[str], 
+        triton_batch_url: Optional[str],
+        triton_chunk_size: int,
+        class_names_map: Optional[Dict[int, str]]
+    ) -> None:
+        if self.detection_source == "local":
+            if not model_path or not os.path.exists(model_path):
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+            log.debug(f"Loading local model from {model_path}")
+            self.model = YOLO(model_path, task='detect')
+            self.model_names = self.model.names
+            
+        elif self.detection_source == "triton_stream":
+            if not triton_stream_url:
+                raise ValueError("Triton stream URL required for triton_stream source")
+            self.triton_stream_client = StreamEndpointClient(
+                base_url=triton_stream_url, 
+                chunk_size=triton_chunk_size
+            )
+            log.debug(f"Triton Stream client: {triton_stream_url}")
+            
+        elif self.detection_source == "triton_ws":
+            if not triton_ws_url:
+                raise ValueError("Triton WebSocket URL required for triton_ws source")
+            self.triton_ws_client = WebSocketEndpointClient(base_url=triton_ws_url)
+            log.debug(f"Triton WebSocket client: {triton_ws_url}")
+            
+        elif self.detection_source == "triton_batch":
+            if not triton_batch_url:
+                raise ValueError("Triton batch URL required for triton_batch source")
+            self.triton_batch_client = MainEndpointClient(base_url=triton_batch_url)
+            log.debug(f"Triton Batch client: {triton_batch_url}")
+            
+        else:
+            raise ValueError(f"Unsupported detection_source: {self.detection_source}")
+
+        if class_names_map and self.detection_source != "local":
+            self.model_names = class_names_map
+            self.model_names_reverse_map = {v: k for k, v in class_names_map.items()}
+        elif not self.model_names and self.detection_source != "local":
+            log.warning("class_names_map not provided for Triton source")
+
+    def _initialize_tracker(
+        self, 
+        tracker_type: str, 
+        tracker_config_path: Optional[str], 
+        frame_rate: int
+    ) -> None:
         script_dir = Path(__file__).parent.resolve()
         default_cfg_path = script_dir / 'cfg' / 'trackers' / f'{tracker_type}.yaml'
 
@@ -177,152 +215,343 @@ class SAHITrackingWrapper:
                 tracker_config_file = check_yaml(f'{tracker_type}.yaml')
             except FileNotFoundError as e:
                 raise FileNotFoundError(
-                    f"Could not find tracker config: '{tracker_type}.yaml'. "
-                    f"Provide a valid 'tracker_config_path' or ensure it's in ultralytics defaults."
+                    f"Tracker config not found: '{tracker_type}.yaml'"
                 ) from e
         
-        log.debug(f"Using tracker config: {tracker_config_file}")
         tracker_cfg_dict = YAML.load(str(tracker_config_file))
-        if tracker_cfg_dict.get('tracker_type') != tracker_type:
-            log.warning(f"Tracker config file specifies type '{tracker_cfg_dict.get('tracker_type')}', "
-                        f"but '{tracker_type}' was requested. Overriding to '{tracker_type}'.")
-            tracker_cfg_dict['tracker_type'] = tracker_type
+        tracker_cfg_dict['tracker_type'] = tracker_type
         
         tracker_cfg = IterableSimpleNamespace(**tracker_cfg_dict)
-        self.tracker_cfg_dict = tracker_cfg_dict # Save for reset
-        self.current_frame_rate = frame_rate # Save for reset
+        self.tracker_cfg_dict = tracker_cfg_dict
+        self.current_frame_rate = frame_rate
 
         if tracker_cfg.tracker_type not in {"bytetrack", "botsort"}:
             raise ValueError(f"Unsupported tracker type: {tracker_cfg.tracker_type}")
 
-        log.info(f"Initializing {tracker_cfg.tracker_type} tracker (frame_rate={frame_rate})...")
         TRACKER_MAP = {"bytetrack": BYTETracker, "botsort": BOTSORT}
-        self.tracker = TRACKER_MAP[tracker_cfg.tracker_type](args=tracker_cfg, frame_rate=frame_rate)
-
-        self.window_size_ratio = window_size_ratio
-        self.overlap_ratio = overlap_ratio
-        self.img_size = img_size # Can be int or tuple
-        self.conf_threshold = conf_threshold # For local model or server-side if configurable
-        self.iou_threshold = iou_threshold   # For local model NMS
-        self.nms_threshold_global = nms_threshold_global
-        self.classes = classes # For local model filtering
+        self.tracker = TRACKER_MAP[tracker_cfg.tracker_type](
+            args=tracker_cfg, frame_rate=frame_rate
+        )
+        log.info(f"Initialized {tracker_cfg.tracker_type} tracker (fps={frame_rate})")
 
     def _get_class_id(self, class_name: str) -> int:
         if not self.model_names_reverse_map:
-            log.debug(f"model_names_reverse_map is empty. Mapping class name '{class_name}' to hash-based ID.")
             import hashlib
             return int(hashlib.md5(class_name.encode()).hexdigest(), 16) % 1000 
         
         class_id = self.model_names_reverse_map.get(class_name)
         if class_id is None:
-            log.warning(f"Class name '{class_name}' not found in model_names_reverse_map. Using hash-based ID.")
             import hashlib
             return int(hashlib.md5(class_name.encode()).hexdigest(), 16) % 1000
         return class_id
 
-    def _adapt_triton_detections_to_torch(
+    def _prepare_batch_windows(
         self, 
-        triton_detections_for_window: List[Dict[str, Any]],
-        window_orig_w: int, window_orig_h: int # Original window dimensions for context
+        frame: np.ndarray, 
+        target_size_w: int, 
+        target_size_h: int
+    ) -> Tuple[List[np.ndarray], List[Tuple[int, int, int, int]]]:
+
+        frame_height, frame_width = frame.shape[:2]
+        windows = self._get_windows(frame_width, frame_height)
+        
+        batch_images = []
+        window_coords_list = []
+        
+        for x1_w, y1_w, x2_w, y2_w in windows:
+            window_slice = frame[y1_w:y2_w, x1_w:x2_w]
+            if window_slice.size == 0:
+                continue
+            
+            window_coords_list.append((x1_w, y1_w, x2_w, y2_w))
+            
+            if (target_size_w != window_slice.shape[1] or 
+                target_size_h != window_slice.shape[0]):
+                resized_window = cv2.resize(window_slice, (target_size_w, target_size_h))
+            else:
+                resized_window = window_slice.copy()
+                
+            batch_images.append(resized_window)
+        
+        return batch_images, window_coords_list
+
+    async def _process_triton_batch(
+        self, 
+        batch_images: List[np.ndarray]
+    ) -> List[Dict[str, Any]]:
+        
+        if self.detection_source == "triton_stream" and self.triton_stream_client:
+            async with self.triton_stream_client as client:
+                result = await client.stream_collect_from_arrays(
+                    image_arrays=batch_images,
+                    model_name=self.triton_model_name
+                )
+                return result.get('results', [])
+                
+        elif self.detection_source == "triton_ws" and self.triton_ws_client:
+            return await self.triton_ws_client.run_inference_session(
+                model_name=self.triton_model_name,
+                images=batch_images
+            )
+            
+        elif self.detection_source == "triton_batch" and self.triton_batch_client:
+            async with self.triton_batch_client as client:
+                if self.triton_model_name == "yolo":
+                    result = await client.yolo_inference_from_arrays(
+                        image_arrays=batch_images,
+                        filenames=[f"window_{i}.jpg" for i in range(len(batch_images))]
+                    )
+                else:
+                    result = await client.donut_inference_from_arrays(
+                        image_arrays=batch_images,
+                        filenames=[f"window_{i}.jpg" for i in range(len(batch_images))]
+                    )
+                return result.get('results', [])
+        
+        return []
+
+    async def _process_chunked_batch(
+        self, 
+        batch_images: List[np.ndarray], 
+        chunk_size: int
+    ) -> List[Dict[str, Any]]:
+
+        all_results = []
+        
+        for i in range(0, len(batch_images), chunk_size):
+            chunk = batch_images[i:i + chunk_size]
+            chunk_results = await self._process_triton_batch(chunk)
+            all_results.extend(chunk_results)
+            
+        return all_results
+
+    def _adapt_detection_format(
+        self,
+        triton_results: List[Dict[str, Any]],
+        window_coords_list: List[Tuple[int, int, int, int]]
+    ) -> List[Dict[str, torch.Tensor]]:
+        adapted_results: List[Dict[str, torch.Tensor]] = []
+        for i, result_data in enumerate(triton_results):
+            if i >= len(window_coords_list):
+                break
+            detections = result_data.get('detections')
+            if detections is None:
+                boxes = result_data.get('boxes', [])
+                confidences = result_data.get('confidences', [])
+                classes = result_data.get('classes', [])
+                detections = []
+                for box, score, cls in zip(boxes, confidences, classes):
+                    label = self.model_names.get(int(cls), str(cls))
+                    detections.append({
+                        'box2d': box,
+                        'score': score,
+                        'label': label
+                    })
+            win_x1, win_y1, win_x2, win_y2 = window_coords_list[i]
+            win_w, win_h = win_x2 - win_x1, win_y2 - win_y1
+            adapted = self._adapt_triton_detections_to_torch(detections, win_w, win_h)
+            adapted_results.append(adapted)
+        while len(adapted_results) < len(window_coords_list):
+            adapted_results.append(self._adapt_triton_detections_to_torch([], 0, 0))
+        return adapted_results
+
+    def _adapt_triton_detections_to_torch(
+        self,
+        triton_detections: List[Dict[str, Any]],
+        window_orig_w: int,
+        window_orig_h: int
     ) -> Dict[str, torch.Tensor]:
-        """
-        Adapts a list of detections from Triton for a single window into torch tensors.
-        Input: [{'box2d': [x1,y1,x2,y2], 'score': float, 'label': str}, ...]
-        Output: {'xyxy': tensor, 'conf': tensor, 'cls': tensor}
-        Coordinates are assumed to be relative to the window.
-        """
-        xyxys, confs, clss = [], [], []
-        if not triton_detections_for_window:
+        if not triton_detections:
             return {
                 'xyxy': torch.empty((0, 4), device=self.device, dtype=torch.float32),
                 'conf': torch.empty(0, device=self.device, dtype=torch.float32),
-                'cls': torch.empty(0, device=self.device, dtype=torch.int32)
+                'cls': torch.empty((0,), device=self.device, dtype=torch.int32)
             }
-
-        for det in triton_detections_for_window:
-            box = det.get('box2d') # Expected: [x1, y1, x2, y2] relative to window
-            score = det.get('score')
-            label = det.get('label')
-
-            if box is None or score is None or label is None:
-                log.warning(f"Skipping malformed Triton detection: {det}")
-                continue
-            
-            # Ensure box coordinates are within window boundaries (optional, depends on server output)
-            # x1, y1, x2, y2 = box
-            # x1 = max(0, min(x1, window_orig_w))
-            # y1 = max(0, min(y1, window_orig_h))
-            # x2 = max(0, min(x2, window_orig_w))
-            # y2 = max(0, min(y2, window_orig_h))
-            # if x1 >= x2 or y1 >= y2:
-            #     log.debug(f"Skipping invalid box {box} after clamping for window {window_orig_w}x{window_orig_h}")
-            #     continue
-            # xyxys.append([x1,y1,x2,y2])
-
+        xyxys, confs, clss = [], [], []
+        for det in triton_detections:
+            box = det['box2d']
             xyxys.append(box)
-            confs.append(score)
-            clss.append(self._get_class_id(label))
-        
+            confs.append(det['score'])
+            clss.append(self._get_class_id(det['label']))
         return {
-            'xyxy': torch.tensor(xyxys, device=self.device, dtype=torch.float32) if xyxys else torch.empty((0, 4), device=self.device, dtype=torch.float32),
-            'conf': torch.tensor(confs, device=self.device, dtype=torch.float32) if confs else torch.empty(0, device=self.device, dtype=torch.float32),
-            'cls': torch.tensor(clss, device=self.device, dtype=torch.int32) if clss else torch.empty(0, device=self.device, dtype=torch.int32)
+            'xyxy': torch.tensor(xyxys, device=self.device, dtype=torch.float32),
+            'conf': torch.tensor(confs, device=self.device, dtype=torch.float32),
+            'cls': torch.tensor(clss, device=self.device, dtype=torch.int32)
         }
 
-    def _adapt_triton_results(
-        self, 
-        triton_payload: List[Dict[str, Any]], # List of {'image_id': str, 'detections': List[DetDict]} or List of {'detections': List[DetDict]}
-        num_expected_windows: int,
-        window_coords_list: List[Tuple[int,int,int,int]] # For original window dimensions
-    ) -> List[Dict[str, torch.Tensor]]:
-        """
-        General adapter for Triton results (Stream or WS).
-        Assumes triton_payload is a list where each item corresponds to a window.
-        Each item is a dict, hopefully containing 'detections' and optionally 'image_id'.
-        If 'image_id' is present and reliable, it could be used for robust ordering.
-        """
-        adapted_results = []
+    def _scale_detections_to_frame(
+        self,
+        per_window_outputs: List[Dict[str, torch.Tensor]],
+        window_coords_list: List[Tuple[int, int, int, int]], 
+        target_size_w: int,
+        target_size_h: int,
+        frame_width: int,
+        frame_height: int
+    ) -> List[Dict[str, Any]]:
+
+        all_detections = []
         
-        if not triton_payload and num_expected_windows > 0:
-            log.warning("Triton returned empty payload but windows were expected.")
-            for i in range(num_expected_windows):
-                 adapted_results.append(self._adapt_triton_detections_to_torch([], 0,0)) # Empty detections
-            return adapted_results
+        for i, model_output in enumerate(per_window_outputs):
+            if i >= len(window_coords_list):
+                continue
+                
+            boxes_xyxy = model_output['xyxy']
+            confs = model_output['conf'] 
+            clss = model_output['cls']
 
-        if len(triton_payload) != num_expected_windows:
-            log.warning(f"Triton results count ({len(triton_payload)}) mismatch with expected windows ({num_expected_windows}). Adapting based on received.")
-            # Potentially pad or truncate, or rely on image_id if available and robust.
-            # For now, process what's received. This might lead to issues if order is lost.
+            if boxes_xyxy.numel() == 0:
+                continue
 
-        for i, window_result_data in enumerate(triton_payload):
-            if i >= num_expected_windows: # More results than windows, shouldn't happen if 1-to-1
-                break 
-            
             win_x1, win_y1, win_x2, win_y2 = window_coords_list[i]
-            win_w, win_h = win_x2 - win_x1, win_y2 - win_y1
+            orig_win_w, orig_win_h = win_x2 - win_x1, win_y2 - win_y1
 
-            # 'detections' is the key assumed from StreamEndpointClient and patched WebSocketEndpointClient
-            detections_for_this_window = window_result_data.get('detections', []) 
-            adapted_results.append(
-                self._adapt_triton_detections_to_torch(detections_for_this_window, win_w, win_h)
-            )
+            for j in range(boxes_xyxy.shape[0]):
+                box_resized = boxes_xyxy[j].tolist()
+                conf = confs[j].item()
+                cls_id = clss[j].item()
+
+                f_x1 = (box_resized[0] / target_size_w) * orig_win_w + win_x1
+                f_y1 = (box_resized[1] / target_size_h) * orig_win_h + win_y1
+                f_x2 = (box_resized[2] / target_size_w) * orig_win_w + win_x1
+                f_y2 = (box_resized[3] / target_size_h) * orig_win_h + win_y1
+                
+                f_x1 = max(0.0, min(f_x1, float(frame_width)))
+                f_y1 = max(0.0, min(f_y1, float(frame_height)))
+                f_x2 = max(0.0, min(f_x2, float(frame_width)))
+                f_y2 = max(0.0, min(f_y2, float(frame_height)))
+                
+                if f_x2 > f_x1 and f_y2 > f_y1:
+                    all_detections.append({
+                        "bbox": [f_x1, f_y1, f_x2 - f_x1, f_y2 - f_y1],
+                        "confidence": conf,
+                        "class_id": cls_id,
+                        "xyxy": [f_x1, f_y1, f_x2, f_y2]
+                    })
+                    
+        return all_detections
+
+    async def process_frame(self, frame: np.ndarray) -> List[Dict[str, Any]]:
+
+        frame_height, frame_width = frame.shape[:2]
         
-        # If Triton returned fewer results than expected, pad with empty detections
-        while len(adapted_results) < num_expected_windows:
-            log.debug(f"Padding missing Triton result for window index {len(adapted_results)}")
-            adapted_results.append(self._adapt_triton_detections_to_torch([],0,0))
+        if isinstance(self.img_size, int):
+            target_size_w = target_size_h = self.img_size
+        else:
+            target_size_w, target_size_h = self.img_size
 
-        return adapted_results
+        batch_images, window_coords_list = self._prepare_batch_windows(
+            frame, target_size_w, target_size_h
+        )
+        
+        if not batch_images:
+            return []
 
+        per_window_outputs: List[Dict[str, torch.Tensor]] = []
+
+        try:
+            if self.detection_source == "local":
+                results = self.model.predict(
+                    source=batch_images,
+                    conf=self.conf_threshold,
+                    iou=self.iou_threshold,
+                    imgsz=(target_size_h, target_size_w),
+                    classes=self.classes,
+                    device=self.device,
+                    verbose=False,
+                    augment=False
+                )
+                
+                for res_obj in results:
+                    per_window_outputs.append({
+                        'xyxy': res_obj.boxes.xyxy.to(self.device),
+                        'conf': res_obj.boxes.conf.to(self.device),
+                        'cls': res_obj.boxes.cls.to(self.device).int()
+                    })
+                    
+            else:
+                if len(batch_images) <= self.triton_max_batch_size:
+                    triton_results = await self._process_triton_batch(batch_images)
+                else:
+                    triton_results = await self._process_chunked_batch(
+                        batch_images, self.triton_max_batch_size
+                    )
+                
+                per_window_outputs = self._adapt_detection_format(
+                    triton_results, window_coords_list
+                )
+
+            all_detections = self._scale_detections_to_frame(
+                per_window_outputs, window_coords_list,
+                target_size_w, target_size_h, frame_width, frame_height
+            )
+
+        except Exception as e:
+            log.error(f"Detection processing error ({self.detection_source}): {e}")
+            return []
+
+        merged_detections_np = self._nms_global(all_detections)
+        mock_results = MockResults(merged_detections_np, (frame_height, frame_width))
+        mock_results.names = self.model_names
+
+        try:
+            tracked_output_np = self.tracker.update(mock_results, frame)
+        except Exception:
+            return []
+
+        return self._format_tracking_results(
+            tracked_output_np, frame_width, frame_height
+        )
+
+    def _format_tracking_results(
+        self, 
+        tracked_output_np: np.ndarray, 
+        frame_width: int, 
+        frame_height: int
+    ) -> List[Dict[str, Any]]:
+        tracked_objects = []
+        
+        if not isinstance(tracked_output_np, np.ndarray) or tracked_output_np.size == 0:
+            return tracked_objects
+            
+        output_cols = tracked_output_np.shape[1]
+        if output_cols < 7:
+            return tracked_objects
+            
+        for row in tracked_output_np:
+            x1, y1, x2, y2, track_id, conf, cls_id = row[:7]
+            
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+            track_id, cls_id = int(track_id), int(cls_id)
+
+            x1 = max(0, min(x1, frame_width))
+            y1 = max(0, min(y1, frame_height))
+            x2 = max(0, min(x2, frame_width))
+            y2 = max(0, min(y2, frame_height))
+
+            if x2 <= x1 or y2 <= y1:
+                continue
+
+            class_name = self.model_names.get(cls_id, f"Cls_{cls_id}")
+            obj_data = {
+                'box': [x1, y1, x2, y2],
+                'track_id': track_id,
+                'class_id': cls_id,
+                'class_name': class_name,
+                'confidence': float(conf)
+            }
+            
+            if output_cols >= 8 and self.tracker_type == 'botsort':
+                tracker_cfg = self.tracker.args.get('tracker_cfg', {})
+                if 'idx' in tracker_cfg.get('public_vars', []):
+                    obj_data['original_det_idx'] = int(row[7])
+            
+            tracked_objects.append(obj_data)
+
+        return tracked_objects
 
     def _get_windows(self, frame_width: int, frame_height: int) -> List[Tuple[int, int, int, int]]:
-        # SAHI slicing logic (remains synchronous)
-        win_w_float = frame_width * self.window_size_ratio[0]
-        win_h_float = frame_height * self.window_size_ratio[1]
-
-        # Ensure window dimensions are at least 1, prevent zero division
-        win_w = max(1, int(win_w_float))
-        win_h = max(1, int(win_h_float))
+        win_w = max(1, int(frame_width * self.window_size_ratio[0]))
+        win_h = max(1, int(frame_height * self.window_size_ratio[1]))
         
         overlap_w = int(win_w * self.overlap_ratio[0])
         overlap_h = int(win_h * self.overlap_ratio[1])
@@ -332,277 +561,73 @@ class SAHITrackingWrapper:
 
         windows = []
         for y_start in range(0, frame_height, step_h):
-            y_end_candidate = y_start + win_h
-            # Adjust y1 if window goes out of bounds (take from end)
-            y1 = y_start if y_end_candidate <= frame_height else max(0, frame_height - win_h)
-            y2 = min(y1 + win_h, frame_height) # Ensure y2 does not exceed frame_height
-
-            if y1 >= y2 : continue # Skip if window has zero or negative height
+            y1 = min(y_start, frame_height - win_h) if y_start + win_h > frame_height else y_start
+            y2 = min(y1 + win_h, frame_height)
+            
+            if y1 >= y2:
+                continue
 
             for x_start in range(0, frame_width, step_w):
-                x_end_candidate = x_start + win_w
-                # Adjust x1 if window goes out of bounds
-                x1 = x_start if x_end_candidate <= frame_width else max(0, frame_width - win_w)
-                x2 = min(x1 + win_w, frame_width) # Ensure x2 does not exceed frame_width
+                x1 = min(x_start, frame_width - win_w) if x_start + win_w > frame_width else x_start
+                x2 = min(x1 + win_w, frame_width)
                 
-                if x1 >= x2 : continue # Skip if window has zero or negative width
+                if x1 >= x2:
+                    continue
 
                 window_coords = (x1, y1, x2, y2)
-                # Add if valid and not already added (though range logic should prevent duplicates)
                 if window_coords not in windows:
-                     windows.append(window_coords)
+                    windows.append(window_coords)
 
-                if x2 == frame_width: break # Reached end of row
-            if y2 == frame_height: break # Reached end of columns
+                if x2 == frame_width:
+                    break
+            if y2 == frame_height:
+                break
         
-        if not windows and frame_width > 0 and frame_height > 0: # Ensure at least one window for valid frames
-            log.warning("SAHI _get_windows returned no windows. Adding full frame as a window.")
-            windows.append((0,0,frame_width, frame_height))
-        elif not windows:
-            log.warning("SAHI _get_windows returned no windows for zero-dim frame.")
-
+        if not windows and frame_width > 0 and frame_height > 0:
+            windows.append((0, 0, frame_width, frame_height))
 
         return windows
 
     def _nms_global(self, detections: List[Dict[str, Any]]) -> np.ndarray:
-        # Global NMS logic (remains synchronous, uses self.device)
         if not detections:
             return np.empty((0, 6), dtype=np.float32)
 
-        detection_list = []
-        for det in detections:
-            xyxy_abs = det['xyxy'] # Absolute frame coordinates
-            detection_list.append([xyxy_abs[0], xyxy_abs[1], xyxy_abs[2], xyxy_abs[3], 
-                                   det['confidence'], det['class_id']])
-        
-        # Ensure NMS runs on the configured device (CPU or GPU)
-        detections_tensor = torch.tensor(detection_list, dtype=torch.float32, device=self.device)
+        detection_tensor = torch.tensor([
+            [det['xyxy'][0], det['xyxy'][1], det['xyxy'][2], det['xyxy'][3], 
+             det['confidence'], det['class_id']]
+            for det in detections
+        ], dtype=torch.float32, device=self.device)
 
-        if detections_tensor.shape[0] == 0:
+        if detection_tensor.shape[0] == 0:
             return np.empty((0, 6), dtype=np.float32)
 
-        boxes = detections_tensor[:, :4]
-        scores = detections_tensor[:, 4]
-        classes = detections_tensor[:, 5] # class_id already int
+        boxes = detection_tensor[:, :4]
+        scores = detection_tensor[:, 4]
+        classes = detection_tensor[:, 5]
 
-        final_detections_list = []
-        unique_classes = torch.unique(classes)
-
-        for cls_id_tensor in unique_classes:
-            cls_id = cls_id_tensor.item()
+        final_detections = []
+        
+        for cls_id in torch.unique(classes):
             cls_mask = (classes == cls_id)
-            if not torch.any(cls_mask): continue
+            if not torch.any(cls_mask):
+                continue
 
             cls_boxes = boxes[cls_mask]
             cls_scores = scores[cls_mask]
             
-            keep_indices_cls = torchvision.ops.nms(cls_boxes, cls_scores, self.nms_threshold_global)
+            keep_indices = torchvision.ops.nms(
+                cls_boxes, cls_scores, self.nms_threshold_global
+            )
             
-            # NMS returns indices relative to the input of NMS (cls_boxes)
-            # We need to map these back to indices in detections_tensor
-            original_indices_for_class = torch.where(cls_mask)[0]
-            final_detections_list.append(detections_tensor[original_indices_for_class[keep_indices_cls]])
+            original_indices = torch.where(cls_mask)[0]
+            final_detections.append(detection_tensor[original_indices[keep_indices]])
 
-        if not final_detections_list:
+        if not final_detections:
             return np.empty((0, 6), dtype=np.float32)
 
-        merged_detections_tensor = torch.cat(final_detections_list, dim=0)
-        return merged_detections_tensor.cpu().numpy() # Tracker expects numpy
+        return torch.cat(final_detections, dim=0).cpu().numpy()
 
-    async def process_frame(self, frame: np.ndarray) -> List[Dict[str, Any]]:
-        frame_height, frame_width = frame.shape[:2]
-        windows = self._get_windows(frame_width, frame_height)
-        all_detections_in_frame_coords = []
-        
-        if not windows:
-            log.debug("No windows generated by SAHI for this frame.")
-            return []
-            
-        batch_images_for_model = [] # Images resized for model input
-        window_coords_list = [] # Original coordinates of these windows
-        
-        # Prepare target_size_w, target_size_h from self.img_size
-        if isinstance(self.img_size, int):
-            target_size_w, target_size_h = self.img_size, self.img_size
-        else: # Tuple
-            target_size_w, target_size_h = self.img_size[0], self.img_size[1]
-
-        for x1_w, y1_w, x2_w, y2_w in windows:
-            window_img_orig_slice = frame[y1_w:y2_w, x1_w:x2_w]
-            if window_img_orig_slice.size == 0:
-                log.warning(f"Skipping empty window slice at ({x1_w},{y1_w})-({x2_w},{y2_w})")
-                continue
-            
-            window_coords_list.append((x1_w, y1_w, x2_w, y2_w)) # Store original slice coords
-            
-            # Resize for model
-            if target_size_w != window_img_orig_slice.shape[1] or target_size_h != window_img_orig_slice.shape[0]:
-                resized_window_img = cv2.resize(window_img_orig_slice, (target_size_w, target_size_h))
-            else:
-                resized_window_img = window_img_orig_slice.copy() # Use copy to avoid issues if array is modified
-            batch_images_for_model.append(resized_window_img)
-
-        num_real_windows = len(batch_images_for_model)
-        if num_real_windows == 0:
-            return []
-        
-        # This will hold detection results for each window,
-        # where each item is a dict {'xyxy': tensor, 'conf': tensor, 'cls': tensor}
-        # with coordinates relative to the *resized* window_img that went into the model.
-        per_window_model_outputs: List[Dict[str, torch.Tensor]] = []
-
-        try:
-            if self.detection_source == "local":
-                # Ultralytics YOLO.predict can take a list of images
-                # Results are also a list, one for each input image
-                local_model_results = self.model.predict(
-                    source=batch_images_for_model,
-                    conf=self.conf_threshold,
-                    iou=self.iou_threshold, # NMS for local model's own output per slice
-                    imgsz=(target_size_h, target_size_w), # Ensure correct order for imgsz
-                    classes=self.classes,
-                    device=self.device,
-                    verbose=False,
-                    augment=False
-                )
-                for res_obj in local_model_results:
-                    # res_obj.boxes contains xyxy, conf, cls tensors
-                    per_window_model_outputs.append({
-                        'xyxy': res_obj.boxes.xyxy.to(self.device), # Ensure on correct device for consistency
-                        'conf': res_obj.boxes.conf.to(self.device),
-                        'cls': res_obj.boxes.cls.to(self.device).int()
-                    })
-
-            elif self.detection_source == "triton_stream" and self.triton_stream_client:
-                async with self.triton_stream_client as client:
-                    triton_results_payload = await client.stream_collect_from_arrays(
-                        image_arrays=batch_images_for_model,
-                        model_name=self.triton_model_name,
-                        # chunk_size can be managed by client's default or passed here
-                    )
-                    # triton_results_payload['results'] is List[Dict{'image_id':str, 'detections':List[DetDict]}]
-                    # Adapt this to per_window_model_outputs
-                    per_window_model_outputs = self._adapt_triton_results(
-                        triton_results_payload.get('results', []), 
-                        num_real_windows,
-                        window_coords_list # Pass original window coords for context if adapter needs them
-                    )
-            
-            elif self.detection_source == "triton_ws" and self.triton_ws_client:
-                 # WebSocket client's run_inference_session handles connect/disconnect per call
-                 # or use a managed connection if __aenter__/__aexit__ were to handle connect(model_name)
-                triton_ws_payload = await self.triton_ws_client.run_inference_session(
-                    model_name=self.triton_model_name,
-                    images=batch_images_for_model, # type: ignore
-                    # chunk_size can be passed if server supports it for WS stream
-                )
-                # triton_ws_payload is List[Dict{'detections':List[DetDict]}] (assuming order is preserved)
-                per_window_model_outputs = self._adapt_triton_results(
-                    triton_ws_payload, 
-                    num_real_windows,
-                    window_coords_list
-                )
-
-            # Post-process detections from per_window_model_outputs
-            for i in range(num_real_windows):
-                if i >= len(per_window_model_outputs): continue # Should not happen if padding works
-
-                model_output_for_window = per_window_model_outputs[i]
-                boxes_xyxy_resized = model_output_for_window['xyxy'] # Coords relative to resized window
-                confs_resized = model_output_for_window['conf']
-                clss_resized = model_output_for_window['cls']
-
-                if boxes_xyxy_resized.numel() == 0:
-                    continue
-
-                win_x1, win_y1, win_x2, win_y2 = window_coords_list[i]
-                orig_win_w, orig_win_h = win_x2 - win_x1, win_y2 - win_y1
-
-                for j in range(boxes_xyxy_resized.shape[0]):
-                    w_box_resized = boxes_xyxy_resized[j].tolist() # [x1r, y1r, x2r, y2r]
-                    conf = confs_resized[j].item()
-                    cls_id = clss_resized[j].item() # Already int
-
-                    # Scale box from resized_window (target_size_w, target_size_h) to original_window_slice
-                    f_x1 = (w_box_resized[0] / target_size_w) * orig_win_w + win_x1
-                    f_y1 = (w_box_resized[1] / target_size_h) * orig_win_h + win_y1
-                    f_x2 = (w_box_resized[2] / target_size_w) * orig_win_w + win_x1
-                    f_y2 = (w_box_resized[3] / target_size_h) * orig_win_h + win_y1
-                    
-                    # Clip to frame boundaries
-                    f_x1, f_y1 = max(0.0, f_x1), max(0.0, f_y1)
-                    f_x2, f_y2 = min(float(frame_width), f_x2), min(float(frame_height), f_y2)
-                    
-                    if f_x2 > f_x1 and f_y2 > f_y1: # Valid detection
-                        all_detections_in_frame_coords.append({
-                            "bbox": [f_x1, f_y1, f_x2 - f_x1, f_y2 - f_y1], # x,y,w,h
-                            "confidence": conf,
-                            "class_id": cls_id, # int
-                            "xyxy": [f_x1, f_y1, f_x2, f_y2] # For NMS global
-                        })
-        except Exception as e:
-            log.error(f"Error during detection processing ({self.detection_source}): {type(e).__name__}: {str(e)}")
-            log.error(f"Full traceback:\n{traceback.format_exc()}")
-            # Fallback to empty if error, or re-raise depending on desired robustness
-            return []
-
-
-        merged_detections_np = self._nms_global(all_detections_in_frame_coords)
-        
-        # Prepare for tracker
-        # MockResults expects numpy array [N, 6] where cols are x1,y1,x2,y2,conf,cls
-        mock_results_for_tracker = MockResults(merged_detections_np, (frame_height, frame_width))
-        mock_results_for_tracker.names = self.model_names # Pass names to MockResults for tracker use
-
-        try:
-            # Tracker update is synchronous
-            tracked_output_np = self.tracker.update(mock_results_for_tracker, frame)
-        except Exception as e:
-            # log.error(f"Error during tracker.update: {type(e).__name__}: {str(e)}")
-            # log.error(f"Full traceback for tracker.update error:\n{traceback.format_exc()}")
-            return []
-
-        tracked_objects_list = []
-        if isinstance(tracked_output_np, np.ndarray) and tracked_output_np.size > 0:
-            output_cols = tracked_output_np.shape[1]
-            # Columns: x1, y1, x2, y2, track_id, conf, cls_id, [optional_idx], [optional_angle]
-            for row in tracked_output_np:
-                if output_cols < 7: continue # Minimum expected columns
-                x1, y1, x2, y2, track_id, conf, cls_id = row[:7]
-                
-                x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
-                track_id, cls_id = int(track_id), int(cls_id)
-
-                # Ensure box is within frame (tracker might output slightly outside)
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(frame_width, x2), min(frame_height, y2)
-
-                if x2 <= x1 or y2 <= y1: continue # Invalid box after clamping
-
-                class_name = self.model_names.get(cls_id, f"Cls_{cls_id}")
-                obj_data = {
-                    'box': [x1, y1, x2, y2],
-                    'track_id': track_id,
-                    'class_id': cls_id,
-                    'class_name': class_name,
-                    'confidence': float(conf)
-                }
-                if output_cols >= 8 : # original_det_idx (BoTSORT with idx) or angle (OBB)
-                    # This logic needs to be specific to the tracker output format
-                    # For BoTSORT with idx:
-                    if self.tracker_type == 'botsort' and 'idx' in self.tracker.args.get('tracker_cfg',{}).get('public_vars',[]):
-                         obj_data['original_det_idx'] = int(row[7])
-                    # Add other specific cases if needed, e.g. for OBB angle
-                
-                tracked_objects_list.append(obj_data)
-        elif isinstance(tracked_output_np, (np.ndarray, list)) and len(tracked_output_np) == 0:
-            pass # No objects tracked
-        else:
-            log.warning(f"Tracker returned unexpected output type: {type(tracked_output_np)}")
-
-        return tracked_objects_list
-
-    def annotate_frame( # Remains synchronous
+    def annotate_frame(
         self, 
         frame: np.ndarray, 
         tracked_objects: List[Dict[str, Any]], 
@@ -610,60 +635,71 @@ class SAHITrackingWrapper:
         line_width: int = 2
     ) -> np.ndarray:
         annotated_frame = frame.copy()
+        
         for obj in tracked_objects:
-            box, track_id = obj['box'], obj['track_id']
-            class_name, confidence = obj['class_name'], obj['confidence']
+            box = obj['box']
+            track_id = obj['track_id']
+            class_name = obj['class_name']
+            confidence = obj['confidence']
+            
             x1, y1, x2, y2 = map(int, box)
             color = get_color(track_id)
+            
             cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, line_width)
+            
             if show_labels:
                 label_text = f"ID:{track_id} {class_name} ({confidence:.2f})"
-                (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
-                # Ensure label background is within frame
-                label_bg_y1 = max(y1 - text_h - baseline - 3, 0)
-                label_bg_y2 = y1 -3 # Should be max(y1 - 3, text_h + baseline) but y1-3 ensures it's above box
+                (text_w, text_h), baseline = cv2.getTextSize(
+                    label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1
+                )
                 
-                # Ensure text itself is visible
-                text_y_pos = max(y1 - baseline - 3, text_h) # if box is at top, text_y_pos should be positive
+                label_bg_y1 = max(y1 - text_h - baseline - 3, 0)
+                label_bg_y2 = y1 - 3
+                text_y_pos = max(y1 - baseline - 3, text_h)
 
-                cv2.rectangle(annotated_frame, (x1, label_bg_y1), (x1 + text_w, label_bg_y2), color, -1)
-                cv2.putText(annotated_frame, label_text, (x1, text_y_pos),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.rectangle(
+                    annotated_frame, (x1, label_bg_y1), (x1 + text_w, label_bg_y2), 
+                    color, -1
+                )
+                cv2.putText(
+                    annotated_frame, label_text, (x1, text_y_pos),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1, cv2.LINE_AA
+                )
+                
         return annotated_frame
 
-    def reset_tracker(self): # Remains synchronous
-        log.info("Resetting tracker state...")
+    def reset_tracker(self) -> None:
+        log.info("Resetting tracker state")
+        
         if hasattr(self.tracker, 'reset'):
             self.tracker.reset()
-        elif hasattr(self, 'tracker_cfg_dict') and hasattr(self, 'current_frame_rate'):
-            log.warning("Tracker does not have a .reset() method. Re-initializing tracker.")
+        else:
+            log.warning("Tracker has no reset method. Re-initializing...")
             tracker_cfg = IterableSimpleNamespace(**self.tracker_cfg_dict)
             TRACKER_MAP = {"bytetrack": BYTETracker, "botsort": BOTSORT}
-            self.tracker = TRACKER_MAP[tracker_cfg.tracker_type](args=tracker_cfg, frame_rate=self.current_frame_rate)
-        else:
-            log.error("Cannot reset tracker: No .reset() method and insufficient info to re-initialize.")
+            self.tracker = TRACKER_MAP[tracker_cfg.tracker_type](
+                args=tracker_cfg, frame_rate=self.current_frame_rate
+            )
 
 
 class VideoStreamTracker:
     def __init__(
         self,
-        # Local model params (optional if Triton used)
         model_path: Optional[str] = None,
-        # SAHI & Tracker params
         tracker_type: str = 'botsort',
         tracker_config_path: Optional[str] = None,
         window_size_ratio: Tuple[float, float] = (0.7, 0.7),
         overlap_ratio: Tuple[float, float] = (0.2, 0.2),
         img_size: Union[int, Tuple[int,int]] = 640,
-        conf: float = 0.25, # Local model conf or general SAHI conf
-        iou: float = 0.45,  # Local model NMS iou
-        nms_global: float = 0.5, # SAHI global NMS iou
-        classes: Optional[List[int]] = None, # Local model classes
+        conf: float = 0.25,
+        iou: float = 0.45,
+        nms_global: float = 0.5,
+        classes: Optional[List[int]] = None,
         device: Optional[Union[str, torch.device]] = None,
-        # Triton params
         detection_source: str = "local",
         triton_stream_url: Optional[str] = None,
         triton_ws_url: Optional[str] = None,
+        triton_batch_url: Optional[str] = None,
         triton_model_name: str = "yolo",
         triton_chunk_size: int = 1,
         class_names_map: Optional[Dict[int, str]] = None
@@ -683,14 +719,15 @@ class VideoStreamTracker:
         self.detection_source = detection_source
         self.triton_stream_url = triton_stream_url
         self.triton_ws_url = triton_ws_url
+        self.triton_batch_url = triton_batch_url
         self.triton_model_name = triton_model_name
         self.triton_chunk_size = triton_chunk_size
         self.class_names_map = class_names_map
         
         self.tracker_wrapper: Optional[SAHITrackingWrapper] = None
-        self.current_frame_rate_stored = 30 # Default, updated on stream start
+        self.current_frame_rate_stored = 30
 
-    def _initialize_tracker(self, fps: int): # Synchronous init of wrapper
+    def _initialize_tracker(self, fps: int):
         self.current_frame_rate_stored = fps
         if self.tracker_wrapper is None:
             log.info(f"Initializing SAHITrackingWrapper with source: {self.detection_source}")
@@ -710,6 +747,7 @@ class VideoStreamTracker:
                 detection_source=self.detection_source,
                 triton_stream_url=self.triton_stream_url,
                 triton_ws_url=self.triton_ws_url,
+                triton_batch_url=self.triton_batch_url,
                 triton_model_name=self.triton_model_name,
                 triton_chunk_size=self.triton_chunk_size,
                 class_names_map=self.class_names_map
@@ -742,7 +780,7 @@ class VideoStreamTracker:
                 if ret_test and test_frame is not None:
                     frame_height, frame_width = test_frame.shape[:2]
                     log.info(f"Read frame dimensions from first frame: {frame_width}x{frame_height}")
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0) # Reset to start
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 else:
                     raise ValueError("Could not read valid frame dimensions from video.")
             else:
@@ -751,7 +789,7 @@ class VideoStreamTracker:
             effective_fps = int(round(native_fps)) if native_fps and native_fps > 0 else fallback_frame_rate
             effective_fps = max(1, effective_fps)
 
-            self._initialize_tracker(effective_fps) # Synchronous call
+            self._initialize_tracker(effective_fps)
 
             frame_num = 0
             while cap.isOpened():
@@ -766,10 +804,9 @@ class VideoStreamTracker:
 
                 frame_process_start_time = time.time()
                 
-                if self.tracker_wrapper is None: # Should not happen if _initialize_tracker worked
+                if self.tracker_wrapper is None:
                     raise RuntimeError("Tracker wrapper not initialized.")
                 
-                # process_frame is now async
                 tracked_objects = await self.tracker_wrapper.process_frame(frame)
                 
                 frame_processing_time = time.time() - frame_process_start_time
@@ -792,11 +829,11 @@ class VideoStreamTracker:
 
     async def stream_camera_tracking(
         self,
-        camera_index: Union[int, str] = 0, # Allow string for e.g. RTSP
+        camera_index: Union[int, str] = 0,
         include_annotated_frame: bool = False,
         show_labels: bool = True,
         line_width: int = 2,
-        frame_rate: int = 30 # Target FPS for camera
+        frame_rate: int = 30
     ) -> AsyncIterator[FrameTrackingResult]:
         cap = cv2.VideoCapture(camera_index)
         if not cap.isOpened():
@@ -804,7 +841,7 @@ class VideoStreamTracker:
 
         cam_frame_height, cam_frame_width = -1,-1
         try:
-            # Attempt to set FPS for cameras that support it
+
             cap.set(cv2.CAP_PROP_FPS, float(frame_rate)) 
             
             ret_test, test_frame = cap.read()
@@ -812,7 +849,7 @@ class VideoStreamTracker:
                 raise IOError(f"Could not read initial frame from camera {camera_index}")
             cam_frame_height, cam_frame_width = test_frame.shape[:2]
             
-            self._initialize_tracker(frame_rate) # Use target frame_rate
+            self._initialize_tracker(frame_rate)
 
             frame_num = 0
             overall_start_time = time.time()
@@ -853,7 +890,7 @@ class VideoStreamTracker:
         finally:
             cap.release()
 
-    def reset_tracker(self): # Synchronous
+    def reset_tracker(self):
         if self.tracker_wrapper:
             self.tracker_wrapper.reset_tracker()
 
@@ -861,9 +898,7 @@ class VideoStreamTracker:
 async def track_video_sahi(
     video_path: str,
     output_path: str,
-    # Local model params (optional)
     model_path: Optional[str] = None,
-    # SAHI & Tracker params
     tracker_type: str = 'botsort',
     tracker_config_path: Optional[str] = None,
     fallback_frame_rate: int = 30,
@@ -880,10 +915,10 @@ async def track_video_sahi(
     classes: Optional[List[int]] = None,
     output_fps_override: Optional[int] = None,
     device: Optional[Union[str, torch.device]] = None,
-    # Triton params
     detection_source: str = "local",
     triton_stream_url: Optional[str] = None,
     triton_ws_url: Optional[str] = None,
+    triton_batch_url: Optional[str] = None,
     triton_model_name: str = "yolo",
     triton_chunk_size: int = 1,
     class_names_map: Optional[Dict[int, str]] = None
@@ -897,20 +932,21 @@ async def track_video_sahi(
         window_size_ratio=window_size_ratio, overlap_ratio=overlap_ratio, img_size=img_size,
         conf=conf, iou=iou, nms_global=nms_global, classes=classes, device=device,
         detection_source=detection_source, triton_stream_url=triton_stream_url,
-        triton_ws_url=triton_ws_url, triton_model_name=triton_model_name,
-        triton_chunk_size=triton_chunk_size, class_names_map=class_names_map
+        triton_ws_url=triton_ws_url, triton_batch_url=triton_batch_url,
+        triton_model_name=triton_model_name, triton_chunk_size=triton_chunk_size, 
+        class_names_map=class_names_map
     )
 
-    cap_check = cv2.VideoCapture(video_path) # For properties
+    cap_check = cv2.VideoCapture(video_path)
     if not cap_check.isOpened():
         raise IOError(f"Could not open video file for property checking: {video_path}") 
     
     frame_width = int(cap_check.get(cv2.CAP_PROP_FRAME_WIDTH))
     frame_height = int(cap_check.get(cv2.CAP_PROP_FRAME_HEIGHT))
     native_fps_check = cap_check.get(cv2.CAP_PROP_FPS)
-    total_frames_approx = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT)) # Can be inaccurate
-    
-    if frame_width <= 0 or frame_height <= 0: # Fallback if props are zero
+    total_frames_approx = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    if frame_width <= 0 or frame_height <= 0:
         ret_test, test_frame = cap_check.read()
         if ret_test and test_frame is not None:
             frame_height, frame_width = test_frame.shape[:2]
@@ -937,7 +973,6 @@ async def track_video_sahi(
     preview_window_name = "SAHI Tracking Preview (Async)"
 
     try:
-        # stream_video_tracking is now an async iterator
         async for result in stream_tracker.stream_video_tracking(
             video_path=video_path, vid_stride=vid_stride,
             include_annotated_frame=True, show_labels=show_labels,
@@ -945,14 +980,14 @@ async def track_video_sahi(
         ):
             if result.annotated_frame is not None:
                 out_writer.write(result.annotated_frame)
-            else: # Should not happen if include_annotated_frame is True and processing succeeds
+            else:
                 log.warning(f"Frame {result.frame_number} had no annotated_frame to write.")
 
             processed_frames_count += 1
             
             if show_preview and result.annotated_frame is not None:
                 cv2.imshow(preview_window_name, result.annotated_frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'): # cv2.waitKey is blocking
+                if cv2.waitKey(1) & 0xFF == ord('q'):
                     log.info("Preview quit by user ('q' key pressed).")
                     break
             
@@ -978,7 +1013,7 @@ async def track_video_sahi(
     finally:
         out_writer.release()
         if show_preview:
-            cv2.destroyAllWindows() # Important to clean up
+            cv2.destroyAllWindows()
 
         total_processing_time = time.time() - processing_start_time
         avg_processing_fps = processed_frames_count / total_processing_time if total_processing_time > 0 and processed_frames_count > 0 else 0
@@ -992,48 +1027,51 @@ async def track_video_sahi(
 
 
 async def main():
-    # Example usage:
+
     class_names = {
         0: 'text'
     }
 
-
-    # --- Configuration ---
-    # General paths (adjust as needed)
     try:
-        from src import path_to_project # Assuming this exists from your original code
+        from src import path_to_project
     except ImportError:
         path_to_project = lambda: os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         log.warning(f"src.path_to_project not found, using fallback: {path_to_project()}")
 
     PROJECT_ROOT = Path(path_to_project())
     DOCS_DIR = PROJECT_ROOT / "docs"
-    VIDEO_INPUT_PATH = str(DOCS_DIR / "check.mp4") # Make sure this video exists
-    # Local model (if used)
-    LOCAL_MODEL_PATH = str(DOCS_DIR / "last.engine") # Or .pt, .onnx etc.
+    VIDEO_INPUT_PATH = str(DOCS_DIR / "check.mp4")
+    LOCAL_MODEL_PATH = str(DOCS_DIR / "last.engine")
 
     OUTPUT_DIR = DOCS_DIR / "outputs_tracker_integration"
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Triton URLs (replace with your actual URLs or set via environment variables)
-    # These would typically come from your src.utils.env.Env()
-    TRITON_HTTP_URL = os.getenv("TRITON_API_URL", "http://localhost:8000") # Triton HTTP/REST port
-    TRITON_WS_URL = os.getenv("TRITON_WS_URL", "ws://localhost:8000")   # Triton WebSocket port for inference service
+    TRITON_HTTP_URL = os.getenv("TRITON_API_URL", "http://localhost:8000")
+    TRITON_WS_URL = os.getenv("TRITON_WS_URL", "ws://localhost:8000")
 
-    # --- Test Scenarios ---
     scenarios = [
+        # {
+        #     "name": "local_yolo",
+        #     "detection_source": "local",
+        #     "model_path": LOCAL_MODEL_PATH, # Required for local
+        #     "output_filename": "output_local_yolo.mp4",
+        #     "triton_stream_url": None, "triton_ws_url": None, "triton_batch_url": None,
+        #     "class_names_map": None
+        # },
         {
-            "name": "local_yolo",
-            "detection_source": "local",
-            "model_path": LOCAL_MODEL_PATH, # Required for local
-            "output_filename": "output_local_yolo.mp4",
-            "triton_stream_url": None, "triton_ws_url": None, "class_names_map": None
+            "name": "triton_batch_yolo",
+            "detection_source": "triton_batch",
+            "model_path": None, # Not used by Triton source
+            "output_filename": "output_triton_batch.mp4",
+            "triton_stream_url": None, "triton_ws_url": None,
+            "triton_batch_url": TRITON_HTTP_URL, # Main endpoint URL
+            "class_names_map": class_names # Provide class names for Triton
         },
         # {
         #     "name": "triton_stream_yolo",
         #     "detection_source": "triton_stream",
         #     "output_filename": "output_triton_stream.mp4",
-        #     "triton_stream_url": TRITON_HTTP_URL, "triton_ws_url": None,
+        #     "triton_stream_url": TRITON_HTTP_URL, "triton_ws_url": None, "triton_batch_url": None,
         #     "class_names_map": class_names, # Provide class names for Triton
         #     "model_path": None, # Not used by Triton source
         # },
@@ -1041,7 +1079,7 @@ async def main():
         #     "name": "triton_ws_yolo",
         #     "detection_source": "triton_ws",
         #     "output_filename": "output_triton_ws.mp4",
-        #     "triton_ws_url": TRITON_WS_URL, "triton_stream_url": None,
+        #     "triton_ws_url": TRITON_WS_URL, "triton_stream_url": None, "triton_batch_url": None,
         #     "class_names_map": class_names, # Provide class names for Triton
         #     "model_path": None, # Not used by Triton source
         # },
@@ -1054,7 +1092,6 @@ async def main():
     for scen in scenarios:
         log.info(f"\n--- Running scenario: {scen['name']} ---")
         
-        # Validate paths for current scenario
         if scen['detection_source'] == 'local' and (not scen['model_path'] or not os.path.exists(scen['model_path'])):
             log.warning(f"Local model path for scenario '{scen['name']}' not found: {scen['model_path']}. Skipping.")
             continue
@@ -1064,7 +1101,9 @@ async def main():
         if scen['detection_source'] == 'triton_ws' and not scen['triton_ws_url']:
             log.warning(f"Triton WebSocket URL not set for scenario '{scen['name']}'. Skipping.")
             continue
-
+        if scen['detection_source'] == 'triton_batch' and not scen['triton_batch_url']:
+            log.warning(f"Triton Batch URL not set for scenario '{scen['name']}'. Skipping.")
+            continue
 
         full_output_path = str(OUTPUT_DIR / scen["output_filename"])
 
@@ -1072,19 +1111,20 @@ async def main():
             await track_video_sahi(
                 video_path=VIDEO_INPUT_PATH,
                 output_path=full_output_path,
-                model_path=scen.get("model_path"), # Will be None if not in scen dict
+                model_path=scen.get("model_path"),
                 tracker_type='botsort',
                 fallback_frame_rate=30,
                 window_size_ratio=(0.7, 0.7), overlap_ratio=(0.1, 0.1),
-                img_size=640, conf=0.1, iou=0.1, nms_global=0.1, # Adjust thresholds as needed
+                img_size=640, conf=0.1, iou=0.1, nms_global=0.1,
                 show_labels=True, line_width=2,
-                show_preview=False, # Set to True for GUI preview (beware of asyncio/cv2 issues)
+                show_preview=False,
                 vid_stride=1, 
-                classes=[0], # Filter classes for local model if needed, e.g., [0] for persons
+                classes=[0],
                 detection_source=scen["detection_source"],
                 triton_stream_url=scen.get("triton_stream_url"),
                 triton_ws_url=scen.get("triton_ws_url"),
-                triton_model_name="yolo", # Your Triton model name for YOLO
+                triton_batch_url=scen.get("triton_batch_url"),
+                triton_model_name="yolo",
                 class_names_map=scen.get("class_names_map")
             )
             log.info(f"Scenario '{scen['name']}' completed. Output at: {full_output_path}")
@@ -1094,9 +1134,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    # Setup basic logging for the example
+
     import logging
-    logging.basicConfig(level=logging.INFO) # General logging
-    # log.setLevel(logging.DEBUG) # Set our specific logger to DEBUG for more details
+    logging.basicConfig(level=logging.INFO)
     
     asyncio.run(main())
