@@ -351,3 +351,4 @@ cython_debug/
 /src/FrameReader/__pycache__/
 /src/keys/jwt-private.pem
 /src/keys/jwt-public.pem
+/logs/

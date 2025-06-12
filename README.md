@@ -1,9 +1,3 @@
-# TODO: Добавить ендпоинты для работы с тритон серверов (основные)
-
-# TODO: Добавить ендпоинты для работы с тритон серверов (в формате стримминга)
-
-# TODO: Добавить ендпоинты для работы с тритон серверов (вебсокетное соединение grpc)
-
 # TODO: Добавить поддержку подключения через main_endpoint.py, stream_endpoint и websocket_endpoint для модели yolo (triton_api) для трекера.
 
 # TODO: Добавить поддержку подключения через main_endpoint.py, stream_endpoint и websocket_endpoint для модели donut (triton_api), 
