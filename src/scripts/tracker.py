@@ -135,7 +135,7 @@ class SAHITrackingWrapper:
                 raise FileNotFoundError(f"Model file not found or not provided for local detection: {model_path}")
             log.debug(f"Loading local detection model from {model_path}...")
             self.model = YOLO(model_path, task='detect')
-            self.model.to(self.device) # Ensure local model is on the correct device
+            # self.model.to(self.device) # Ensure local model is on the correct device
             self.model_names = self.model.names
             log.debug(f"Local detection model loaded. Names: {self.model_names}")
         elif self.detection_source == "triton_stream":
@@ -163,6 +163,7 @@ class SAHITrackingWrapper:
             self.model_names_reverse_map = {v: k for k, v in self.model_names.items()}
 
         self.triton_model_name = triton_model_name
+        self.tracker_type = tracker_type
 
         script_dir = Path(__file__).parent.resolve()
         default_cfg_path = script_dir / 'cfg' / 'trackers' / f'{tracker_type}.yaml'
@@ -557,8 +558,8 @@ class SAHITrackingWrapper:
             # Tracker update is synchronous
             tracked_output_np = self.tracker.update(mock_results_for_tracker, frame)
         except Exception as e:
-            log.error(f"Error during tracker.update: {type(e).__name__}: {str(e)}")
-            log.error(f"Full traceback for tracker.update error:\n{traceback.format_exc()}")
+            # log.error(f"Error during tracker.update: {type(e).__name__}: {str(e)}")
+            # log.error(f"Full traceback for tracker.update error:\n{traceback.format_exc()}")
             return []
 
         tracked_objects_list = []
@@ -589,7 +590,7 @@ class SAHITrackingWrapper:
                 if output_cols >= 8 : # original_det_idx (BoTSORT with idx) or angle (OBB)
                     # This logic needs to be specific to the tracker output format
                     # For BoTSORT with idx:
-                    if tracker_type == 'botsort' and 'idx' in self.tracker.args.get('tracker_cfg',{}).get('public_vars',[]):
+                    if self.tracker_type == 'botsort' and 'idx' in self.tracker.args.get('tracker_cfg',{}).get('public_vars',[]):
                          obj_data['original_det_idx'] = int(row[7])
                     # Add other specific cases if needed, e.g. for OBB angle
                 
@@ -1021,21 +1022,21 @@ async def main():
 
     # --- Test Scenarios ---
     scenarios = [
-        # {
-        #     "name": "local_yolo",
-        #     "detection_source": "local",
-        #     "model_path": LOCAL_MODEL_PATH, # Required for local
-        #     "output_filename": "output_local_yolo.mp4",
-        #     "triton_stream_url": None, "triton_ws_url": None, "class_names_map": None
-        # },
         {
-            "name": "triton_stream_yolo",
-            "detection_source": "triton_stream",
-            "output_filename": "output_triton_stream.mp4",
-            "triton_stream_url": TRITON_HTTP_URL, "triton_ws_url": None,
-            "class_names_map": class_names, # Provide class names for Triton
-            "model_path": None, # Not used by Triton source
+            "name": "local_yolo",
+            "detection_source": "local",
+            "model_path": LOCAL_MODEL_PATH, # Required for local
+            "output_filename": "output_local_yolo.mp4",
+            "triton_stream_url": None, "triton_ws_url": None, "class_names_map": None
         },
+        # {
+        #     "name": "triton_stream_yolo",
+        #     "detection_source": "triton_stream",
+        #     "output_filename": "output_triton_stream.mp4",
+        #     "triton_stream_url": TRITON_HTTP_URL, "triton_ws_url": None,
+        #     "class_names_map": class_names, # Provide class names for Triton
+        #     "model_path": None, # Not used by Triton source
+        # },
         # {
         #     "name": "triton_ws_yolo",
         #     "detection_source": "triton_ws",
@@ -1079,7 +1080,7 @@ async def main():
                 show_labels=True, line_width=2,
                 show_preview=False, # Set to True for GUI preview (beware of asyncio/cv2 issues)
                 vid_stride=1, 
-                classes=None, # Filter classes for local model if needed, e.g., [0] for persons
+                classes=[0], # Filter classes for local model if needed, e.g., [0] for persons
                 detection_source=scen["detection_source"],
                 triton_stream_url=scen.get("triton_stream_url"),
                 triton_ws_url=scen.get("triton_ws_url"),

@@ -38,23 +38,23 @@ def create_user(user: Users) -> int:
 def update_user(user_id: int, updates: Dict[str, Any]) -> None:
     set_clauses = []
     params = []
-    
+
     field_mapping = {
         "fingerprint_hash": "FingerprintHash",
-        "first_visit": "FirstVisit", 
+        "first_visit": "FirstVisit",
         "last_activity": "LastActivity",
         "total_sessions": "TotalSessions",
         "total_videos_processed": "TotalVideosProcessed"
     }
-    
+
     for db_field, value in updates.items():
         if db_field in field_mapping and value is not None:
             set_clauses.append(f"{db_field} = %s")
             params.append(value)
-    
+
     if not set_clauses:
         return
-        
+
     params.append(user_id)
     query = f"UPDATE users SET {', '.join(set_clauses)} WHERE id = %s"
     db.execute_query(query, params)

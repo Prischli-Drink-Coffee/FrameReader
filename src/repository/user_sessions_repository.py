@@ -49,7 +49,7 @@ def create_session(session: UserSessions) -> int:
 def update_session(session_id: int, updates: Dict[str, Any]) -> None:
     set_clauses = []
     params = []
-    
+
     field_mapping = {
         "jwt_token_hash": "JwtTokenHash",
         "expires_at": "ExpiresAt",
@@ -58,15 +58,15 @@ def update_session(session_id: int, updates: Dict[str, Any]) -> None:
         "is_active": "IsActive",
         "last_activity": "LastActivity"
     }
-    
+
     for db_field, value in updates.items():
         if db_field in field_mapping and value is not None:
             set_clauses.append(f"{db_field} = %s")
             params.append(value)
-    
+
     if not set_clauses:
         return
-        
+
     params.append(session_id)
     query = f"UPDATE user_sessions SET {', '.join(set_clauses)} WHERE id = %s"
     db.execute_query(query, params)

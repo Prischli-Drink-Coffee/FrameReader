@@ -24,20 +24,36 @@ class AuthJWT(BaseModel):
 
     def __init__(self, **data):
         super().__init__(**data)
-        self._private_key_content: Path = Path(__file__).resolve().parent.parent / "keys" / "jwt-private.pem"
-        self._public_key_content: Path = Path(__file__).resolve().parent.parent / "keys" / "jwt-public.pem"
+        
+        script_dir = Path(__file__).resolve().parent
+        default_private_key_path = script_dir.parent / "keys" / "jwt-private.pem"
+        default_public_key_path = script_dir.parent / "keys" / "jwt-public.pem"
+
+        try:
+            with open(default_private_key_path, "r") as f:
+                self._private_key_content = f.read()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Private key file not found at {default_private_key_path}")
+        except Exception as e:
+            raise IOError(f"Error reading private key file {default_private_key_path}: {e}")
+
+        try:
+            with open(default_public_key_path, "r") as f:
+                self._public_key_content = f.read()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Public key file not found at {default_public_key_path}")
+        except Exception as e:
+            raise IOError(f"Error reading public key file {default_public_key_path}: {e}")
 
     @property
-    def private_key_content(self):
+    def private_key_content(self) -> str:
         return self._private_key_content
 
     @property
-    def public_key_content(self):
+    def public_key_content(self) -> str:
         return self._public_key_content
-
 
 
 class Settings(BaseSettings):
     auth_jwt: AuthJWT = AuthJWT()
     algorithm: str = "RS256"
-

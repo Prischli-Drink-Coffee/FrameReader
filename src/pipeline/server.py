@@ -1,19 +1,18 @@
 import os
-from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile, status, Form, Query
-from typing import Dict
+import asyncio
+import json
+from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile, status, Form, Query, WebSocket, WebSocketDisconnect
+from typing import Dict, List, Any, Optional, AsyncGenerator
 from fastapi.openapi.models import Tag as OpenApiTag
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from src.utils.custom_logging import setup_logging
 from src.utils.env import Env
 from src import path_to_project
-from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
-from fastapi import Query, Form
 from decimal import Decimal
-
-from typing import Dict
-from fastapi import Request, Response, Depends
+from urllib.parse import urlparse
+from src.scripts.video_downloader import VideoDownloader
 from src.services.cookie_services import session_manager
 
 from src.database.models import (
@@ -30,6 +29,8 @@ from src.services import (
     user_sessions_services,
     video_sessions_services
 )
+from src.scripts.tracker import VideoStreamTracker
+from src.scripts.recognizer import TextRecognizer
 
 env = Env()
 log = setup_logging()
@@ -39,8 +40,7 @@ app = FastAPI()
 
 app_server = FastAPI(title="FrameReader Server API",
                      version="1.0.0",
-                     description="This API server is intended for the FrameReader project. For rights, \
-                                  contact the service owner (dfvolkhin@edu.hse.ru).")
+                     description="This API server is intended for the FrameReader project. For rights, contact the service owner (dfvolkhin@edu.hse.ru).")
 
 app.mount("/server", app_server)
 # app.mount("/public", app_public)
@@ -52,6 +52,28 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+TRITON_WS_URL = env.__getattr__("TRITON_WS_URL")
+TRITON_HTTP_URL = env.__getattr__("TRITON_API_URL")
+
+
+try:
+    global_video_stream_tracker = VideoStreamTracker(
+        detection_source="triton_ws",
+        triton_ws_url=TRITON_WS_URL,
+        triton_model_name="yolo",
+    )
+    global_text_recognizer = TextRecognizer(
+        triton_ws_url=TRITON_WS_URL,
+        triton_model_name="donut",
+    )
+    log.info("Global VideoStreamTracker and TextRecognizer initialized.")
+except Exception as e:
+    log.error(f"Failed to initialize global tracker/recognizer: {e}")
+    global_video_stream_tracker = None
+    global_text_recognizer = None
+
 
 # PublicMainTag = OpenApiTag(name="Main", description="CRUD operations main")
 ServerMainTag = OpenApiTag(name="Main", description="CRUD operations main")
@@ -73,6 +95,109 @@ app_server.openapi_tags = [
 # app_public.openapi_tags = [
 #     # PublicMainTag.model_dump(),
 # ]
+
+
+@app_server.websocket("/ws/video_recognition/{video_session_id}")
+async def websocket_video_recognition_endpoint(
+    websocket: WebSocket,
+    video_session_id: int,
+    video_url: str
+):
+    await websocket.accept()
+    log.info(f"WebSocket connection accepted for video_session_id: {video_session_id} and video_url: {video_url}")
+
+    if global_video_stream_tracker is None or global_text_recognizer is None:
+        await websocket.send_json({"status": "error", "message": "Server components not initialized."})
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        return
+
+    temp_video_path = None
+    try:
+        await video_sessions_services.update_session_status(
+            video_session_id, ProcessingStatusEnum.DOWNLOADING
+        )
+        log.info(f"Video session {video_session_id} status updated to DOWNLOADING.")
+        await websocket.send_json({"status": "info", "message": "Downloading video..."})
+
+        downloader = VideoDownloader(max_duration=60)
+
+        temp_video_path = downloader.download_video_to_temp(video_url)
+        if temp_video_path is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to download or validate video from the provided URL."
+            )
+        log.info(f"Video {video_url} downloaded to temporary path: {temp_video_path}")
+        await websocket.send_json({"status": "info", "message": "Video downloaded. Starting processing..."})
+
+        await video_sessions_services.update_session_status(
+            video_session_id, ProcessingStatusEnum.PROCESSING
+        )
+        log.info(f"Video session {video_session_id} status updated to PROCESSING.")
+
+        tracking_stream = global_video_stream_tracker.stream_video_tracking(
+            video_path=temp_video_path,
+            include_annotated_frame=False,
+            show_labels=False
+        )
+
+        recognition_stream = global_text_recognizer.recognize_text_from_tracking_stream(
+            tracking_results_stream=tracking_stream
+        )
+
+        buffered_results = []
+
+        async for result in recognition_stream:
+            try:
+                await websocket.send_json(result)
+                buffered_results.append(result)
+            except WebSocketDisconnect:
+                log.info(f"WebSocket disconnected by client for session {video_session_id}.")
+                break
+            except Exception as e:
+                log.error(f"Error sending message to WebSocket for session {video_session_id}: {e}")
+                break
+
+        await video_sessions_services.update_session_status(
+            video_session_id, ProcessingStatusEnum.COMPLETED
+        )
+        log.info(f"Video session {video_session_id} status updated to COMPLETED.")
+        await websocket.send_json({"status": "info", "message": "Video processing completed."})
+
+        for frame_data in buffered_results:
+            await frame_annotations_services.create_annotation_batch_from_recognition_results(
+                video_session_id, frame_data
+            )
+        log.info(f"Buffered results for session {video_session_id} (count: {len(buffered_results)}) would be saved to DB.")
+
+
+    except WebSocketDisconnect:
+        log.info(f"WebSocket disconnected for session {video_session_id}.")
+        await video_sessions_services.fail_video_session(
+            video_session_id, "WebSocket disconnected unexpectedly."
+        )
+        await websocket.send_json({"status": "error", "message": "WebSocket disconnected unexpectedly."})
+    except HTTPException as e:
+        log.error(f"HTTPException during video processing for session {video_session_id}: {e.detail}")
+        await websocket.send_json({"status": "error", "message": e.detail})
+        await websocket.close(code=e.status_code)
+        await video_sessions_services.fail_video_session(
+            video_session_id, f"Processing failed: {e.detail}"
+        )
+    except Exception as e:
+        log.error(f"Error processing video recognition for session {video_session_id}: {e}", exc_info=True)
+        await websocket.send_json({"status": "error", "message": str(e)})
+        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+        await video_sessions_services.fail_video_session(
+            video_session_id, f"Processing failed: {e}"
+        )
+    finally:
+        if temp_video_path and Path(temp_video_path).exists():
+            VideoDownloader._cleanup_temp_dir(os.path.dirname(temp_video_path))
+            log.info(f"Temporary video file {temp_video_path} cleaned up.")
+        if not websocket.client_disconnected:
+            await websocket.close()
+        log.info(f"WebSocket connection closed for video_session_id: {video_session_id}.")
 
 
 @app_server.post("/auth/session/create", response_model=Dict[str, Any], tags=["Cookie"])
@@ -188,7 +313,7 @@ async def get_session_info(
             current_user["session_id"]
         )
         user_stats = user_services.get_user_statistics(current_user["user_id"])
-        
+
         return {
             "session_info": session_security_info,
             "user_stats": user_stats,
@@ -1380,7 +1505,6 @@ async def get_processing_queue_status():
     except HTTPException as ex:
         log.exception(f"Error", exc_info=ex)
         raise ex
-
 
 
 def run_server():

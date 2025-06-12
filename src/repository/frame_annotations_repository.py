@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 from datetime import datetime
 from decimal import Decimal
 from src.database.my_connector import db
@@ -22,8 +22,8 @@ def get_annotations_by_video_session(video_session_id: int) -> List[Dict[str, An
 
 def get_annotations_by_timestamp_range(video_session_id: int, start_time: Decimal, end_time: Decimal) -> List[Dict[str, Any]]:
     query = """
-        SELECT * FROM frame_annotations 
-        WHERE video_session_id = %s AND frame_timestamp BETWEEN %s AND %s 
+        SELECT * FROM frame_annotations
+        WHERE video_session_id = %s AND frame_timestamp BETWEEN %s AND %s
         ORDER BY frame_timestamp ASC
     """
     return db.fetch_all(query, (video_session_id, start_time, end_time))
@@ -31,9 +31,9 @@ def get_annotations_by_timestamp_range(video_session_id: int, start_time: Decima
 
 def get_latest_annotations(video_session_id: int, limit: int = 10) -> List[Dict[str, Any]]:
     query = """
-        SELECT * FROM frame_annotations 
-        WHERE video_session_id = %s 
-        ORDER BY created_at DESC 
+        SELECT * FROM frame_annotations
+        WHERE video_session_id = %s
+        ORDER BY created_at DESC
         LIMIT %s
     """
     return db.fetch_all(query, (video_session_id, limit))
@@ -62,26 +62,33 @@ def create_annotation_batch(annotations: List[FrameAnnotations]) -> List[int]:
         (ann.VideoSessionID, ann.FrameTimestamp, ann.AnnotationData)
         for ann in annotations
     ]
-    return db.execute_batch(query, params_list)
+    # Since db.execute_batch is removed, we'll use a loop for now.
+    # This is less efficient but maintains functionality.
+    # For true batching, my_connector.py would need execute_batch with executemany.
+    inserted_ids = []
+    for params in params_list:
+        cursor = db.execute_query(query, params)
+        inserted_ids.append(cursor.lastrowid)
+    return inserted_ids
 
 
 def update_annotation(annotation_id: int, updates: Dict[str, Any]) -> None:
     set_clauses = []
     params = []
-    
+
     field_mapping = {
         "frame_timestamp": "FrameTimestamp",
         "annotation_data": "AnnotationData"
     }
-    
+
     for db_field, value in updates.items():
         if db_field in field_mapping and value is not None:
             set_clauses.append(f"{db_field} = %s")
             params.append(value)
-    
+
     if not set_clauses:
         return
-        
+
     params.append(annotation_id)
     query = f"UPDATE frame_annotations SET {', '.join(set_clauses)} WHERE id = %s"
     db.execute_query(query, params)
@@ -106,8 +113,8 @@ def get_annotation_count_by_video_session(video_session_id: int) -> int:
 
 def get_annotations_by_date_range(start_date: datetime, end_date: datetime) -> List[Dict[str, Any]]:
     query = """
-        SELECT * FROM frame_annotations 
-        WHERE created_at BETWEEN %s AND %s 
+        SELECT * FROM frame_annotations
+        WHERE created_at BETWEEN %s AND %s
         ORDER BY created_at DESC
     """
     return db.fetch_all(query, (start_date, end_date))
@@ -116,8 +123,8 @@ def get_annotations_by_date_range(start_date: datetime, end_date: datetime) -> L
 def get_video_session_timeline(video_session_id: int) -> List[Dict[str, Any]]:
     query = """
         SELECT frame_timestamp, annotation_data, created_at
-        FROM frame_annotations 
-        WHERE video_session_id = %s 
+        FROM frame_annotations
+        WHERE video_session_id = %s
         ORDER BY frame_timestamp ASC
     """
     return db.fetch_all(query, (video_session_id,))
@@ -125,7 +132,7 @@ def get_video_session_timeline(video_session_id: int) -> List[Dict[str, Any]]:
 
 def search_annotations_by_content(video_session_id: int, search_term: str) -> List[Dict[str, Any]]:
     query = """
-        SELECT * FROM frame_annotations 
+        SELECT * FROM frame_annotations
         WHERE video_session_id = %s AND JSON_SEARCH(annotation_data, 'all', %s) IS NOT NULL
         ORDER BY frame_timestamp ASC
     """

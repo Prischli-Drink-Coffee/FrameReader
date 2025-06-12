@@ -42,7 +42,7 @@ def create_video_session(session: VideoSessions) -> int:
     params = (
         session.UserID,
         session.VideoURL,
-        session.ProcessingStatusEnum.value,
+        session.ProcessingStatus.value, # Corrected from ProcessingStatusEnum.value
         session.StartedAt or datetime.utcnow()
     )
     cursor = db.execute_query(query, params)
@@ -52,14 +52,14 @@ def create_video_session(session: VideoSessions) -> int:
 def update_video_session(session_id: int, updates: Dict[str, Any]) -> None:
     set_clauses = []
     params = []
-    
+
     field_mapping = {
         "video_url": "VideoURL",
         "processing_status": "ProcessingStatus",
         "started_at": "StartedAt",
         "completed_at": "CompletedAt"
     }
-    
+
     for db_field, value in updates.items():
         if db_field in field_mapping and value is not None:
             set_clauses.append(f"{db_field} = %s")
@@ -67,10 +67,10 @@ def update_video_session(session_id: int, updates: Dict[str, Any]) -> None:
                 params.append(value.value)
             else:
                 params.append(value)
-    
+
     if not set_clauses:
         return
-        
+
     params.append(session_id)
     query = f"UPDATE video_sessions SET {', '.join(set_clauses)} WHERE id = %s"
     db.execute_query(query, params)
@@ -79,14 +79,14 @@ def update_video_session(session_id: int, updates: Dict[str, Any]) -> None:
 def update_session_status(session_id: int, status: ProcessingStatusEnum, completed_at: Optional[datetime] = None) -> None:
     if status == ProcessingStatusEnum.COMPLETED and completed_at is None:
         completed_at = datetime.utcnow()
-    
+
     if completed_at:
         query = "UPDATE video_sessions SET processing_status = %s, completed_at = %s WHERE id = %s"
         params = (status.value, completed_at, session_id)
     else:
         query = "UPDATE video_sessions SET processing_status = %s WHERE id = %s"
         params = (status.value, session_id)
-    
+
     db.execute_query(query, params)
 
 
@@ -118,9 +118,9 @@ def get_sessions_by_date_range(start_date: datetime, end_date: datetime) -> List
 
 def get_completed_sessions_by_user(user_id: int, limit: int = 10) -> List[Dict[str, Any]]:
     query = """
-        SELECT * FROM video_sessions 
-        WHERE user_id = %s AND processing_status = 'completed' 
-        ORDER BY completed_at DESC 
+        SELECT * FROM video_sessions
+        WHERE user_id = %s AND processing_status = 'completed'
+        ORDER BY completed_at DESC
         LIMIT %s
     """
     return db.fetch_all(query, (user_id, limit))

@@ -30,8 +30,8 @@ def get_annotations_by_video_session(video_session_id: int) -> List[FrameAnnotat
 
 
 def get_annotations_by_timestamp_range(
-    video_session_id: int, 
-    start_time: Decimal, 
+    video_session_id: int,
+    start_time: Decimal,
     end_time: Decimal
 ) -> List[FrameAnnotations]:
     annotations = frame_annotations_repository.get_annotations_by_timestamp_range(
@@ -46,8 +46,8 @@ def get_latest_annotations(video_session_id: int, limit: int = 10) -> List[Frame
 
 
 def create_annotation(
-    video_session_id: int, 
-    frame_timestamp: Decimal, 
+    video_session_id: int,
+    frame_timestamp: Decimal,
     annotation_data: Dict[str, Any]
 ) -> FrameAnnotations:
     annotation = FrameAnnotations(
@@ -55,7 +55,7 @@ def create_annotation(
         FrameTimestamp=frame_timestamp,
         AnnotationData=annotation_data
     )
-    
+
     annotation_id = frame_annotations_repository.create_annotation(annotation)
     return get_annotation_by_id(annotation_id)
 
@@ -66,19 +66,25 @@ def create_annotation_batch(annotations: List[FrameAnnotations]) -> List[FrameAn
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Annotations list cannot be empty"
         )
-    
+
     annotation_ids = frame_annotations_repository.create_annotation_batch(annotations)
-    return [get_annotation_by_id(annotation_id) for annotation_id in annotation_ids]
+    
+    # This will still result in N queries to get each annotation by ID.
+    # For true batching, a method to fetch multiple annotations by IDs would be needed in the repository.
+    created_annotations = []
+    for ann_id in annotation_ids:
+        created_annotations.append(get_annotation_by_id(ann_id))
+    return created_annotations
 
 
 def update_annotation_fields(annotation_id: int, updates: Dict[str, Any]) -> Dict[str, str]:
-    get_annotation_by_id(annotation_id)
-    
+    get_annotation_by_id(annotation_id) # Check if exists
+
     allowed_fields = {
         "frame_timestamp": Decimal,
         "annotation_data": dict
     }
-    
+
     filtered_updates = {}
     for field, value in updates.items():
         if field in allowed_fields and value is not None:
@@ -86,19 +92,19 @@ def update_annotation_fields(annotation_id: int, updates: Dict[str, Any]) -> Dic
                 filtered_updates[field] = Decimal(str(value))
             else:
                 filtered_updates[field] = value
-    
+
     if not filtered_updates:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No valid fields to update"
         )
-    
+
     frame_annotations_repository.update_annotation(annotation_id, filtered_updates)
     return {"message": "Frame annotation updated successfully"}
 
 
 def delete_annotation(annotation_id: int) -> Dict[str, str]:
-    get_annotation_by_id(annotation_id)
+    get_annotation_by_id(annotation_id) # Check if exists
     frame_annotations_repository.delete_annotation(annotation_id)
     return {"message": "Frame annotation deleted successfully"}
 
@@ -114,7 +120,7 @@ def delete_annotations_by_video_session(video_session_id: int) -> Dict[str, Any]
 def get_video_session_statistics(video_session_id: int) -> Dict[str, Any]:
     total_count = frame_annotations_repository.get_annotation_count_by_video_session(video_session_id)
     annotations = get_annotations_by_video_session(video_session_id)
-    
+
     if not annotations:
         return {
             "video_session_id": video_session_id,
@@ -122,11 +128,11 @@ def get_video_session_statistics(video_session_id: int) -> Dict[str, Any]:
             "duration": None,
             "average_interval": None
         }
-    
+
     timestamps = [ann.FrameTimestamp for ann in annotations]
     duration = max(timestamps) - min(timestamps)
     average_interval = duration / (len(timestamps) - 1) if len(timestamps) > 1 else None
-    
+
     return {
         "video_session_id": video_session_id,
         "total_annotations": total_count,
@@ -153,46 +159,46 @@ def search_annotations_by_content(video_session_id: int, search_term: str) -> Li
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Search term cannot be empty"
         )
-    
+
     annotations = frame_annotations_repository.search_annotations_by_content(video_session_id, search_term)
     return [FrameAnnotations(**annotation) for annotation in annotations]
 
 
 def get_annotation_density_analysis(video_session_id: int, interval_seconds: int = 10) -> List[Dict[str, Any]]:
     annotations = get_annotations_by_video_session(video_session_id)
-    
+
     if not annotations:
         return []
-    
+
     interval_decimal = Decimal(str(interval_seconds))
     min_timestamp = min(ann.FrameTimestamp for ann in annotations)
     max_timestamp = max(ann.FrameTimestamp for ann in annotations)
-    
+
     intervals = []
     current_start = min_timestamp
-    
+
     while current_start <= max_timestamp:
         current_end = current_start + interval_decimal
         count = sum(
-            1 for ann in annotations 
+            1 for ann in annotations
             if current_start <= ann.FrameTimestamp < current_end
         )
-        
+
         intervals.append({
             "start_time": float(current_start),
-            "end_time": float(current_end),
+            "end_time": float(current_start + interval_decimal), # Use current_start + interval_decimal for end_time
             "annotation_count": count
         })
-        
+
         current_start = current_end
-    
+
     return intervals
 
 
 def export_annotations_for_video_session(video_session_id: int) -> Dict[str, Any]:
     annotations = get_annotations_by_video_session(video_session_id)
     statistics = get_video_session_statistics(video_session_id)
-    
+
     return {
         "video_session_id": video_session_id,
         "export_timestamp": datetime.utcnow(),
@@ -212,15 +218,16 @@ def export_annotations_for_video_session(video_session_id: int) -> Dict[str, Any
 def cleanup_old_annotations(days_old: int = 90) -> Dict[str, Any]:
     cutoff_date = datetime.utcnow() - timedelta(days=days_old)
     old_annotations = get_annotations_by_date_range(
-        datetime.min, 
+        datetime.min,
         cutoff_date
     )
-    
+
     deleted_count = 0
-    for annotation in old_annotations:
-        frame_annotations_repository.delete_annotation(annotation.ID)
-        deleted_count += 1
-    
+    if old_annotations:
+        for annotation in old_annotations:
+            frame_annotations_repository.delete_annotation(annotation.ID)
+            deleted_count += 1
+
     return {
         "message": f"Cleaned up {deleted_count} old annotations",
         "deleted_count": deleted_count
@@ -230,11 +237,50 @@ def cleanup_old_annotations(days_old: int = 90) -> Dict[str, Any]:
 def get_annotations_summary_by_content_type(video_session_id: int) -> Dict[str, int]:
     annotations = get_annotations_by_video_session(video_session_id)
     content_types = {}
-    
+
     for annotation in annotations:
         annotation_data = annotation.AnnotationData
         if isinstance(annotation_data, dict):
             for key in annotation_data.keys():
                 content_types[key] = content_types.get(key, 0) + 1
-    
+
     return content_types
+
+
+def create_annotation_batch_from_recognition_results(
+    video_session_id: int,
+    recognition_results: List[Dict[str, Any]]
+) -> List[FrameAnnotations]:
+    """
+    Creates FrameAnnotations from buffered recognition results and saves them in batch.
+    """
+    annotations_to_create = []
+    for frame_data in recognition_results:
+        frame_number = frame_data.get("frame_number")
+        timestamp = frame_data.get("timestamp")
+        tracked_objects = frame_data.get("tracked_objects", [])
+
+        # Convert timestamp to Decimal
+        frame_timestamp_decimal = Decimal(str(timestamp))
+
+        # Prepare annotation_data
+        # This structure should match what you expect in AnnotationData in models.py
+        # Example: {"frame_number": ..., "tracked_objects": [...]}
+        annotation_data = {
+            "frame_number": frame_number,
+            "tracked_objects": tracked_objects # This already includes recognized_text
+        }
+
+        annotations_to_create.append(
+            FrameAnnotations(
+                VideoSessionID=video_session_id,
+                FrameTimestamp=frame_timestamp_decimal,
+                AnnotationData=annotation_data
+            )
+        )
+    
+    if annotations_to_create:
+        log.info(f"Saving {len(annotations_to_create)} annotations for video session {video_session_id} to DB.")
+        created_annotations = create_annotation_batch(annotations_to_create)
+        return created_annotations
+    return []
