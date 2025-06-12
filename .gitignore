@@ -352,3 +352,6 @@ cython_debug/
 /src/keys/jwt-private.pem
 /src/keys/jwt-public.pem
 /logs/
+
+/docs/outputs_tracker_integration/
+/docs/check.mp4
