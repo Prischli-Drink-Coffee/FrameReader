@@ -401,3 +401,4 @@ watch -n 1 nvidia-smi
 
 **🔗 Связанные проекты:**
 - [FrameReader Triton Server](https://github.com/Prischli-Drink-Coffee/FrameReader/tree/triton-server) - Развертывание обученных моделей
+- [FrameReader Server](https://github.com/Prischli-Drink-Coffee/FrameReader/tree/server) - Бекенд
