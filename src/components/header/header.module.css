@@ -1,0 +1,11 @@
+.Link {
+  font-size: 14px;
+}
+.Link:hover {
+  text-decoration: underline;
+}
+.Link__active {
+  font-weight: bold;
+  color: #007bff;
+}
+/*# sourceMappingURL=header.module.css.map */
