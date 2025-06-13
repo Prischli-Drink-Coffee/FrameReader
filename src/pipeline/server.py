@@ -97,14 +97,13 @@ app_server.openapi_tags = [
 # ]
 
 
-@app_server.websocket("/ws/video_recognition/{video_session_id}")
+@app_server.websocket("/ws/video_recognition/{session_id}")
 async def websocket_video_recognition_endpoint(
     websocket: WebSocket,
-    video_session_id: int,
-    video_url: str
+    session_id: int
 ):
     await websocket.accept()
-    log.info(f"WebSocket connection accepted for video_session_id: {video_session_id} and video_url: {video_url}")
+    log.info(f"WebSocket connection accepted for session_id: {session_id}")
 
     if global_video_stream_tracker is None or global_text_recognizer is None:
         await websocket.send_json({"status": "error", "message": "Server components not initialized."})
@@ -112,37 +111,45 @@ async def websocket_video_recognition_endpoint(
         return
 
     temp_video_path = None
+    params = {}
+    video_url = None
+
     try:
+        init_msg = await websocket.receive_json()
+        video_url = init_msg.get("video_url")
+        params = init_msg.get("params", {})
+
+        if not video_url:
+            await websocket.send_json({"status": "error", "message": "Missing video_url in init message."})
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+            return
+
         await video_sessions_services.update_session_status(
             video_session_id, ProcessingStatusEnum.DOWNLOADING
         )
-        log.info(f"Video session {video_session_id} status updated to DOWNLOADING.")
         await websocket.send_json({"status": "info", "message": "Downloading video..."})
 
-        downloader = VideoDownloader(max_duration=60)
-
+        downloader = VideoDownloader(max_duration=params.get("max_duration", 60))
         temp_video_path = downloader.download_video_to_temp(video_url)
         if temp_video_path is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Failed to download or validate video from the provided URL."
-            )
-        log.info(f"Video {video_url} downloaded to temporary path: {temp_video_path}")
-        await websocket.send_json({"status": "info", "message": "Video downloaded. Starting processing..."})
+            await websocket.send_json({"status": "error", "message": "Failed to download video."})
+            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
+            return
 
+        await websocket.send_json({"status": "info", "message": "Video downloaded. Starting processing..."})
         await video_sessions_services.update_session_status(
             video_session_id, ProcessingStatusEnum.PROCESSING
         )
-        log.info(f"Video session {video_session_id} status updated to PROCESSING.")
 
         tracking_stream = global_video_stream_tracker.stream_video_tracking(
             video_path=temp_video_path,
-            include_annotated_frame=False,
-            show_labels=False
+            include_annotated_frame=params.get("include_annotated_frame", False),
+            show_labels=params.get("show_labels", False),
+            **params.get("tracker_extra", {})
         )
-
         recognition_stream = global_text_recognizer.recognize_text_from_tracking_stream(
-            tracking_results_stream=tracking_stream
+            tracking_stream=tracking_stream,
+            **params.get("recognizer_extra", {})
         )
 
         buffered_results = []
@@ -161,7 +168,6 @@ async def websocket_video_recognition_endpoint(
         await video_sessions_services.update_session_status(
             video_session_id, ProcessingStatusEnum.COMPLETED
         )
-        log.info(f"Video session {video_session_id} status updated to COMPLETED.")
         await websocket.send_json({"status": "info", "message": "Video processing completed."})
 
         for frame_data in buffered_results:
@@ -170,19 +176,10 @@ async def websocket_video_recognition_endpoint(
             )
         log.info(f"Buffered results for session {video_session_id} (count: {len(buffered_results)}) would be saved to DB.")
 
-
     except WebSocketDisconnect:
         log.info(f"WebSocket disconnected for session {video_session_id}.")
         await video_sessions_services.fail_video_session(
             video_session_id, "WebSocket disconnected unexpectedly."
-        )
-        await websocket.send_json({"status": "error", "message": "WebSocket disconnected unexpectedly."})
-    except HTTPException as e:
-        log.error(f"HTTPException during video processing for session {video_session_id}: {e.detail}")
-        await websocket.send_json({"status": "error", "message": e.detail})
-        await websocket.close(code=e.status_code)
-        await video_sessions_services.fail_video_session(
-            video_session_id, f"Processing failed: {e.detail}"
         )
     except Exception as e:
         log.error(f"Error processing video recognition for session {video_session_id}: {e}", exc_info=True)
