@@ -32,8 +32,8 @@ function Layout() {
       backgroundColor="menu_white"
       width="100%"
       minH="100vh"
-      spacing={0} // ”бираем возможные промежутки между элементами
-      align="stretch" // ”бедитесь, что компоненты раст€гиваютс€ по ширине
+      spacing={0}
+      align="stretch"
     >
       <Header />
       <Outlet />

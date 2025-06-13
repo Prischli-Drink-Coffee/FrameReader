@@ -8,7 +8,7 @@ const theme = extendTheme({
   fonts: {
     body: `Montserrat, sans-serif`,
   },
-  //варианты для различных компонентов
+
   components: {
     Tooltip: {
       baseStyle: {
