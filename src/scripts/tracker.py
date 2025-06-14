@@ -167,24 +167,24 @@ class SAHITrackingWrapper:
             self.model = YOLO(model_path, task='detect')
             self.model_names = self.model.names
             
-        elif self.detection_source == "triton_stream":
+        elif self.detection_source == "stream":
             if not triton_stream_url:
-                raise ValueError("Triton stream URL required for triton_stream source")
+                raise ValueError("Triton stream URL required for stream source")
             self.triton_stream_client = StreamEndpointClient(
                 base_url=triton_stream_url, 
                 chunk_size=triton_chunk_size
             )
             log.debug(f"Triton Stream client: {triton_stream_url}")
             
-        elif self.detection_source == "triton_ws":
+        elif self.detection_source == "ws":
             if not triton_ws_url:
-                raise ValueError("Triton WebSocket URL required for triton_ws source")
+                raise ValueError("Triton WebSocket URL required for ws source")
             self.triton_ws_client = WebSocketEndpointClient(base_url=triton_ws_url)
             log.debug(f"Triton WebSocket client: {triton_ws_url}")
             
-        elif self.detection_source == "triton_batch":
+        elif self.detection_source == "main":
             if not triton_batch_url:
-                raise ValueError("Triton batch URL required for triton_batch source")
+                raise ValueError("Triton batch URL required for main source")
             self.triton_batch_client = MainEndpointClient(base_url=triton_batch_url)
             log.debug(f"Triton Batch client: {triton_batch_url}")
             
@@ -1060,7 +1060,7 @@ async def main():
         # },
         {
             "name": "triton_batch_yolo",
-            "detection_source": "triton_batch",
+            "detection_source": "main",
             "model_path": None, # Not used by Triton source
             "output_filename": "output_triton_batch.mp4",
             "triton_stream_url": None, "triton_ws_url": None,
@@ -1069,7 +1069,7 @@ async def main():
         },
         # {
         #     "name": "triton_stream_yolo",
-        #     "detection_source": "triton_stream",
+        #     "detection_source": "stream",
         #     "output_filename": "output_triton_stream.mp4",
         #     "triton_stream_url": TRITON_HTTP_URL, "triton_ws_url": None, "triton_batch_url": None,
         #     "class_names_map": class_names, # Provide class names for Triton
@@ -1077,7 +1077,7 @@ async def main():
         # },
         # {
         #     "name": "triton_ws_yolo",
-        #     "detection_source": "triton_ws",
+        #     "detection_source": "ws",
         #     "output_filename": "output_triton_ws.mp4",
         #     "triton_ws_url": TRITON_WS_URL, "triton_stream_url": None, "triton_batch_url": None,
         #     "class_names_map": class_names, # Provide class names for Triton
@@ -1095,13 +1095,13 @@ async def main():
         if scen['detection_source'] == 'local' and (not scen['model_path'] or not os.path.exists(scen['model_path'])):
             log.warning(f"Local model path for scenario '{scen['name']}' not found: {scen['model_path']}. Skipping.")
             continue
-        if scen['detection_source'] == 'triton_stream' and not scen['triton_stream_url']:
+        if scen['detection_source'] == 'stream' and not scen['triton_stream_url']:
             log.warning(f"Triton Stream URL not set for scenario '{scen['name']}'. Skipping.")
             continue
-        if scen['detection_source'] == 'triton_ws' and not scen['triton_ws_url']:
+        if scen['detection_source'] == 'ws' and not scen['triton_ws_url']:
             log.warning(f"Triton WebSocket URL not set for scenario '{scen['name']}'. Skipping.")
             continue
-        if scen['detection_source'] == 'triton_batch' and not scen['triton_batch_url']:
+        if scen['detection_source'] == 'main' and not scen['triton_batch_url']:
             log.warning(f"Triton Batch URL not set for scenario '{scen['name']}'. Skipping.")
             continue
 

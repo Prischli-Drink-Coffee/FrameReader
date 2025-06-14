@@ -1,81 +1,141 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Any, Protocol
 from datetime import datetime, timedelta
 from fastapi import Request, HTTPException, status, Response
-from fastapi.security import HTTPBearer
 import jwt
 import hashlib
-import secrets
+from dataclasses import dataclass
 from src.jwt_cookie.settings import Settings
 from src.utils.custom_logging import setup_logging
 
+
 log = setup_logging()
-settings = Settings()
+
+
+@dataclass(frozen=True)
+class TokenPayload:
+    user_id: int
+    fingerprint_hash: str
+    session_id: int
+    token_type: str = "user_session"
+
+    def to_jwt_dict(self, expiration_delta: timedelta) -> Dict[str, Any]:
+        now = datetime.utcnow()
+        return {
+            "user_id": self.user_id,
+            "fingerprint_hash": self.fingerprint_hash,
+            "session_id": self.session_id,
+            "token_type": self.token_type,
+            "exp": int((now + expiration_delta).timestamp()),
+            "iat": int(now.timestamp())
+        }
 
 
 class FingerprintCollector:
     @staticmethod
     def generate_fingerprint_hash(request: Request) -> str:
-        user_agent = request.headers.get("user-agent", "")
-        accept_language = request.headers.get("accept-language", "")
-        accept_encoding = request.headers.get("accept-encoding", "")
-        
-        fingerprint_data = f"{user_agent}|{accept_language}|{accept_encoding}"
+        headers = [
+            request.headers.get("user-agent", ""),
+            request.headers.get("accept-language", ""),
+            request.headers.get("accept-encoding", "")
+        ]
+        fingerprint_data = "|".join(headers)
         return hashlib.sha256(fingerprint_data.encode()).hexdigest()
 
 
 class JWTCookieManager:
-    def __init__(self):
-        self.cookie_name = "session_token"
-        self.cookie_max_age = 30 * 24 * 60 * 60
-        self.settings = Settings()
+    def __init__(self) -> None:
+        self._cookie_name: str = "session_token"
+        self._cookie_max_age: int = 30 * 24 * 60 * 60
+        self._settings = Settings()
         
     def create_user_token(self, user_id: int, fingerprint_hash: str, session_id: int) -> str:
-        payload = {
-            "user_id": user_id,
-            "fingerprint_hash": fingerprint_hash,
-            "session_id": session_id,
-            "token_type": "user_session",
-            "exp": datetime.utcnow() + timedelta(seconds=self.cookie_max_age),
-            "iat": datetime.utcnow()
-        }
+        payload = TokenPayload(
+            user_id=user_id,
+            fingerprint_hash=fingerprint_hash,
+            session_id=session_id
+        )
+        
+        jwt_payload = payload.to_jwt_dict(timedelta(seconds=self._cookie_max_age))
         
         return jwt.encode(
-            payload=payload,
-            key=self.settings.auth_jwt.private_key_content,
-            algorithm=self.settings.algorithm
+            payload=jwt_payload,
+            key=self._settings.auth_jwt.private_key_content,
+            algorithm=self._settings.algorithm
         )
     
-    def decode_token(self, token: str) -> Dict:
+    def decode_token(self, token: str) -> Dict[str, Any]:
         try:
-            payload = jwt.decode(
-                token,
-                self.settings.auth_jwt.public_key_content,
-                algorithms=[self.settings.algorithm]
+            return jwt.decode(
+                jwt=token,
+                key=self._settings.auth_jwt.public_key_content,
+                algorithms=[self._settings.algorithm]
             )
-            return payload
         except jwt.ExpiredSignatureError:
+            log.warning("JWT token expired")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, 
                 detail="Token expired"
             )
-        except jwt.InvalidTokenError:
+        except jwt.InvalidTokenError as e:
+            log.warning(f"Invalid JWT token: {e}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED, 
                 detail="Invalid token"
             )
     
+    def validate_payload_structure(self, payload: Dict[str, Any]) -> bool:
+        required_fields = {"user_id", "fingerprint_hash", "session_id", "token_type"}
+        return required_fields.issubset(payload.keys())
+    
+    def extract_user_data(self, payload: Dict[str, Any]) -> Dict[str, int]:
+        if not self.validate_payload_structure(payload):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload structure"
+            )
+        return {
+            "user_id": int(payload["user_id"]),
+            "session_id": int(payload["session_id"])
+        }
+    
+    def verify_fingerprint(self, payload: Dict[str, Any], request: Request) -> bool:
+        token_fingerprint = payload.get("fingerprint_hash")
+        current_fingerprint = FingerprintCollector.generate_fingerprint_hash(request)
+        return token_fingerprint == current_fingerprint
+    
     def set_cookie(self, response: Response, token: str) -> None:
         response.set_cookie(
-            key=self.cookie_name,
+            key=self._cookie_name,
             value=token,
-            max_age=self.cookie_max_age,
+            max_age=self._cookie_max_age,
             httponly=True,
             secure=True,
             samesite="lax"
         )
     
     def get_token_from_request(self, request: Request) -> Optional[str]:
-        return request.cookies.get(self.cookie_name)
+        return request.cookies.get(self._cookie_name)
     
     def clear_cookie(self, response: Response) -> None:
-        response.delete_cookie(key=self.cookie_name)
+        response.delete_cookie(
+            key=self._cookie_name,
+            httponly=True,
+            secure=True,
+            samesite="lax"
+        )
+    
+    def refresh_token(self, old_token: str, request: Request) -> str:
+        payload = self.decode_token(old_token)
+        
+        if not self.verify_fingerprint(payload, request):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Device fingerprint mismatch"
+            )
+        
+        user_data = self.extract_user_data(payload)
+        return self.create_user_token(
+            user_data["user_id"],
+            payload["fingerprint_hash"],
+            user_data["session_id"]
+        )

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 
 class ProcessingStatusEnum(str, Enum):
+    DOWNLOADING = "downloading"
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
@@ -58,9 +59,9 @@ class UserSessions(BaseModel):
     IPAddress: Optional[StrictStr] = Field(None,
                                            alias="ip_address",
                                            examples=["192.168.1.1"])
-    IsActive: StrictBool = Field(default=True,
-                                 alias="is_active",
-                                 examples=[True])
+    IsActive: StrictInt = Field(default=1,
+                                alias="is_active",
+                                examples=[1])
     CreatedAt: Optional[datetime] = Field(None,
                                           alias="created_at",
                                           examples=[f"{datetime.now()}"])

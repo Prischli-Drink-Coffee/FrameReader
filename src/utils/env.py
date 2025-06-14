@@ -20,7 +20,7 @@ class Env:
         if value is None:
             ex = AttributeError(f"Attribute {attr} not found in environment variables")
             log.exception(ex)
-            raise ex
+            return None
         return value
 
     def __setattr__(self, attr, value):

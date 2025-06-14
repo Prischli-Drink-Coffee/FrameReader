@@ -11,6 +11,7 @@ from src.triton_api.main_endpoint import MainEndpointClient
 from src.triton_api.stream_endpoint import StreamEndpointClient
 from src.triton_api.websocket_endpoint import WebSocketEndpointClient
 from src.scripts.tracker import VideoStreamTracker, FrameTrackingResult
+from src.scripts.cancel_handler import CancellationHandler
 
 from src.utils.custom_logging import setup_logging
 
@@ -122,18 +123,18 @@ class DonutTextRecognizer:
 
 async def recognize_text_from_video(
     video_path: str,
-    model_path: Optional[str],
-    tracker_type: str,
-    tracker_config_path: Optional[str],
-    window_size_ratio: Tuple[float, float],
-    overlap_ratio: Tuple[float, float],
-    img_size: Union[int, Tuple[int, int]],
-    conf: float,
-    iou: float,
-    nms_global: float,
-    classes: Optional[List[int]],
-    device: Optional[Union[str, Any]],
-    tracker_detection_source: str,
+    model_path: Optional[str] = None,
+    tracker_type: str = "botsort",
+    tracker_config_path: Optional[str] = None,
+    window_size_ratio: Tuple[float, float] = (0.7, 0.7),
+    overlap_ratio: Tuple[float, float] = (0.1, 0.1),
+    img_size: Union[int, Tuple[int, int]] = 640,
+    conf: float = 0.1,
+    iou: float = 0.1,
+    nms_global: float = 0.1,
+    classes: Optional[List[int]] = None,
+    device: Optional[Union[str, Any]] = None,
+    tracker_detection_source: str = "main",
     triton_stream_url: Optional[str] = None,
     triton_ws_url: Optional[str] = None,
     triton_batch_url: Optional[str] = None,
@@ -144,8 +145,15 @@ async def recognize_text_from_video(
     donut_triton_stream_url: Optional[str] = None,
     donut_triton_ws_url: Optional[str] = None,
     donut_model_name: str = "donut",
-    history_length: int = 8
-) -> AsyncIterator[FrameTrackingResult]:
+    history_length: int = 8,
+    include_annotated_frame: bool = True,
+    show_labels: bool = True,
+    **tracker_kwargs
+) -> AsyncIterator[Any]:
+    cancellation = CancellationHandler()
+    
+    if classes is None:
+        classes = [0]
 
     tracker = VideoStreamTracker(
         model_path=model_path,
@@ -166,11 +174,14 @@ async def recognize_text_from_video(
         triton_model_name=triton_model_name,
         triton_chunk_size=triton_chunk_size
     )
+    
     tracking_stream = tracker.stream_video_tracking(
         video_path=video_path,
-        include_annotated_frame=True,
-        show_labels=True
+        include_annotated_frame=include_annotated_frame,
+        show_labels=show_labels,
+        **tracker_kwargs
     )
+    
     client = DonutInferenceClient(
         detection_source=donut_detection_source,
         model_name=donut_model_name,
@@ -178,9 +189,19 @@ async def recognize_text_from_video(
         triton_stream_url=donut_triton_stream_url,
         triton_ws_url=donut_triton_ws_url
     )
+    
     recognizer = DonutTextRecognizer(tracker, client, history_length)
-    async for enriched in recognizer.recognize_text_from_tracking_stream(tracking_stream):
-        yield enriched
+    
+    try:
+        async for enriched in recognizer.recognize_text_from_tracking_stream(tracking_stream):
+            cancellation.check_cancellation()
+            yield enriched
+    except asyncio.CancelledError:
+        log.info("Text recognition cancelled by user")
+        raise
+    except KeyboardInterrupt:
+        log.info("Text recognition interrupted by user")
+        raise asyncio.CancelledError("Processing interrupted")
 
 
 async def main() -> None:
@@ -189,34 +210,19 @@ async def main() -> None:
     docs = project_root.parent / "docs"
     video_file = docs / "check.mp4"
     if not video_file.exists():
-        logger.error(f"{video_file} not found")
+        log.error(f"{video_file} not found")
         return
 
     triton_http = os.getenv("TRITON_API_URL", "http://localhost:8000")
     triton_ws = os.getenv("TRITON_WS_URL", "ws://localhost:8000")
     scenarios = [
         ("donut_main", dict(donut_detection_source="main", donut_triton_main_url=triton_http)),
-        # ("donut_stream", dict(donut_detection_source="stream", donut_triton_stream_url=triton_http)),
-        # ("donut_ws", dict(donut_detection_source="ws", donut_triton_ws_url=triton_ws)),
     ]
 
     for name, ds in scenarios:
-        logger.info(f"--- {name} ---")
+        log.info(f"--- {name} ---")
         async for frame in recognize_text_from_video(
             video_path=str(video_file),
-            model_path=None, # str(docs / "last.engine"),
-            tracker_type="botsort",
-            tracker_config_path=None,
-            window_size_ratio=(0.7, 0.7),
-            overlap_ratio=(0.1, 0.1),
-            img_size=640,
-            conf=0.1,
-            iou=0.1,
-            nms_global=0.1,
-            classes=[0],
-            device=None,
-            tracker_detection_source="triton_batch",
-            triton_batch_url=triton_http,
             **ds,
             history_length=24
         ):

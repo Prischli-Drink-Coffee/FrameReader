@@ -40,11 +40,11 @@ def create_user(fingerprint_hash: str) -> Users:
 
     current_time = datetime.utcnow()
     user = Users(
-        FingerprintHash=fingerprint_hash,
-        FirstVisit=current_time,
-        LastActivity=current_time,
-        TotalSessions=0,
-        TotalVideosProcessed=0
+        fingerprint_hash=fingerprint_hash,
+        first_visit=current_time,
+        last_activity=current_time,
+        total_sessions=0,
+        total_videos_processed=0
     )
 
     user_id = user_repository.create_user(user)

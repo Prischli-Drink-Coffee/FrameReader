@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Union
 from datetime import datetime
 from src.database.my_connector import db
 from src.database.models import VideoSessions, ProcessingStatusEnum
@@ -42,7 +42,7 @@ def create_video_session(session: VideoSessions) -> int:
     params = (
         session.UserID,
         session.VideoURL,
-        session.ProcessingStatus.value, # Corrected from ProcessingStatusEnum.value
+        session.ProcessingStatus.value,
         session.StartedAt or datetime.utcnow()
     )
     cursor = db.execute_query(query, params)
@@ -76,16 +76,18 @@ def update_video_session(session_id: int, updates: Dict[str, Any]) -> None:
     db.execute_query(query, params)
 
 
-def update_session_status(session_id: int, status: ProcessingStatusEnum, completed_at: Optional[datetime] = None) -> None:
-    if status == ProcessingStatusEnum.COMPLETED and completed_at is None:
+def update_session_status(session_id: int, status: Union[ProcessingStatusEnum, str], completed_at: Optional[datetime] = None) -> None:
+    status_value = status.value if hasattr(status, 'value') else status
+    
+    if status_value == 'completed' and completed_at is None:
         completed_at = datetime.utcnow()
 
     if completed_at:
         query = "UPDATE video_sessions SET processing_status = %s, completed_at = %s WHERE id = %s"
-        params = (status.value, completed_at, session_id)
+        params = (status_value, completed_at, session_id)
     else:
         query = "UPDATE video_sessions SET processing_status = %s WHERE id = %s"
-        params = (status.value, session_id)
+        params = (status_value, session_id)
 
     db.execute_query(query, params)
 

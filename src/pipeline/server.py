@@ -1,8 +1,9 @@
 import os
 import asyncio
 import json
-from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile, status, Form, Query, WebSocket, WebSocketDisconnect
-from typing import Dict, List, Any, Optional, AsyncGenerator
+from fastapi import FastAPI, HTTPException, Depends, Request, File, UploadFile, status, Form, Query, WebSocket, WebSocketDisconnect, Response
+from typing import Dict, List, Any, Optional, AsyncGenerator, Set
+from enum import Enum
 from fastapi.openapi.models import Tag as OpenApiTag
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
@@ -12,8 +13,11 @@ from src import path_to_project
 from datetime import datetime, timedelta
 from decimal import Decimal
 from urllib.parse import urlparse
-from src.scripts.video_downloader import VideoDownloader
 from src.services.cookie_services import session_manager
+from pathlib import Path
+import asyncio
+import signal
+from contextlib import asynccontextmanager
 
 from src.database.models import (
     Users,
@@ -29,18 +33,91 @@ from src.services import (
     user_sessions_services,
     video_sessions_services
 )
+from src.utils.cancellation_handler import CancellationHandler
+from src.scripts.video_downloader import VideoDownloader
 from src.scripts.tracker import VideoStreamTracker
-from src.scripts.recognizer import TextRecognizer
+from src.scripts.recognizer import recognize_text_from_video
 
 env = Env()
 log = setup_logging()
+
+
+class VideoProcessingManager:
+    _active_sessions: Set[int] = set()
+    _shutdown_requested: bool = False
+    
+    @classmethod
+    def add_session(cls, session_id: int) -> None:
+        cls._active_sessions.add(session_id)
+    
+    @classmethod
+    def remove_session(cls, session_id: int) -> None:
+        cls._active_sessions.discard(session_id)
+    
+    @classmethod
+    def get_active_sessions(cls) -> Set[int]:
+        return cls._active_sessions.copy()
+    
+    @classmethod
+    def request_shutdown(cls) -> None:
+        cls._shutdown_requested = True
+        CancellationHandler().signal_shutdown()
+    
+    @classmethod
+    def is_shutdown_requested(cls) -> bool:
+        return cls._shutdown_requested
+
+
+async def cleanup_active_sessions():
+    """Cleanup active sessions during shutdown"""
+    active_sessions = VideoProcessingManager.get_active_sessions()
+    
+    if active_sessions:
+        log.info(f"Cleaning up {len(active_sessions)} active sessions")
+        
+        for session_id in active_sessions:
+            try:
+                video_sessions_services.fail_video_session(
+                    session_id, "Server shutdown"
+                )
+            except Exception as e:
+                log.error(f"Error failing session {session_id}: {e}")
+        
+        # Wait up to 10 seconds for sessions to complete
+        for _ in range(100):
+            if not VideoProcessingManager.get_active_sessions():
+                break
+            await asyncio.sleep(0.1)
+        else:
+            log.warning("Timeout waiting for sessions to complete")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Setup
+    cancellation = CancellationHandler()
+    
+    def signal_handler(signum, frame):
+        log.info(f"Received shutdown signal {signum}")
+        VideoProcessingManager.request_shutdown()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    yield
+    
+    # Cleanup
+    log.info("Shutting down, waiting for active sessions to complete...")
+    await cleanup_active_sessions()
+    log.info("Shutdown complete")
 
 
 app = FastAPI()
 
 app_server = FastAPI(title="FrameReader Server API",
                      version="1.0.0",
-                     description="This API server is intended for the FrameReader project. For rights, contact the service owner (dfvolkhin@edu.hse.ru).")
+                     description="This API server is intended for the FrameReader project. For rights, contact the service owner (dfvolkhin@edu.hse.ru).",
+                     lifespan=lifespan)
 
 app.mount("/server", app_server)
 # app.mount("/public", app_public)
@@ -54,25 +131,8 @@ app.add_middleware(
 )
 
 
-TRITON_WS_URL = env.__getattr__("TRITON_WS_URL")
 TRITON_HTTP_URL = env.__getattr__("TRITON_API_URL")
-
-
-try:
-    global_video_stream_tracker = VideoStreamTracker(
-        detection_source="triton_ws",
-        triton_ws_url=TRITON_WS_URL,
-        triton_model_name="yolo",
-    )
-    global_text_recognizer = TextRecognizer(
-        triton_ws_url=TRITON_WS_URL,
-        triton_model_name="donut",
-    )
-    log.info("Global VideoStreamTracker and TextRecognizer initialized.")
-except Exception as e:
-    log.error(f"Failed to initialize global tracker/recognizer: {e}")
-    global_video_stream_tracker = None
-    global_text_recognizer = None
+TRITON_WS_URL = env.__getattr__("TRITON_WS_URL")
 
 
 # PublicMainTag = OpenApiTag(name="Main", description="CRUD operations main")
@@ -97,104 +157,268 @@ app_server.openapi_tags = [
 # ]
 
 
-@app_server.websocket("/ws/video_recognition/{session_id}")
-async def websocket_video_recognition_endpoint(
-    websocket: WebSocket,
-    session_id: int
-):
-    await websocket.accept()
-    log.info(f"WebSocket connection accepted for session_id: {session_id}")
+class WebSocketState(Enum):
+    CONNECTING = "connecting"
+    OPEN = "open"
+    CLOSING = "closing"
+    CLOSED = "closed"
 
-    if global_video_stream_tracker is None or global_text_recognizer is None:
-        await websocket.send_json({"status": "error", "message": "Server components not initialized."})
-        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-        return
 
-    temp_video_path = None
-    params = {}
-    video_url = None
+class WebSocketConnectionManager:
+    def __init__(self, websocket: WebSocket):
+        self.websocket = websocket
+        self._state = WebSocketState.CONNECTING
+    
+    async def accept(self) -> None:
+        await self.websocket.accept()
+        self._state = WebSocketState.OPEN
+    
+    async def send_json(self, data: Dict[str, Any]) -> bool:
+        if self._state != WebSocketState.OPEN:
+            return False
+        try:
+            await self.websocket.send_json(data)
+            return True
+        except Exception as e:
+            log.error(f"Failed to send WebSocket message: {e}")
+            self._state = WebSocketState.CLOSED
+            return False
+    
+    async def close(self, code: int = 1000) -> None:
+        if self._state in (WebSocketState.CLOSING, WebSocketState.CLOSED):
+            return
+            
+        self._state = WebSocketState.CLOSING
+        try:
+            await self.websocket.close(code=code)
+        except Exception as e:
+            log.debug(f"WebSocket close error (ignoring): {e}")
+        finally:
+            self._state = WebSocketState.CLOSED
+    
+    @property
+    def is_open(self) -> bool:
+        return self._state == WebSocketState.OPEN
 
-    try:
-        init_msg = await websocket.receive_json()
+
+class VideoProcessingError(Exception):
+    def __init__(self, message: str, should_close_ws: bool = True):
+        super().__init__(message)
+        self.should_close_ws = should_close_ws
+
+
+class VideoProcessor:
+    def __init__(self, session_id: int, websocket_manager: WebSocketConnectionManager):
+        self.session_id = session_id
+        self.ws_manager = websocket_manager
+        self.temp_video_path: Optional[str] = None
+        self.cancellation = CancellationHandler()
+        
+    async def process_video_request(self, init_msg: Dict[str, Any]) -> None:
         video_url = init_msg.get("video_url")
         params = init_msg.get("params", {})
-
+        
         if not video_url:
-            await websocket.send_json({"status": "error", "message": "Missing video_url in init message."})
-            await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
-
-        await video_sessions_services.update_session_status(
-            video_session_id, ProcessingStatusEnum.DOWNLOADING
-        )
-        await websocket.send_json({"status": "info", "message": "Downloading video..."})
-
-        downloader = VideoDownloader(max_duration=params.get("max_duration", 60))
-        temp_video_path = downloader.download_video_to_temp(video_url)
-        if temp_video_path is None:
-            await websocket.send_json({"status": "error", "message": "Failed to download video."})
-            await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-            return
-
-        await websocket.send_json({"status": "info", "message": "Video downloaded. Starting processing..."})
-        await video_sessions_services.update_session_status(
-            video_session_id, ProcessingStatusEnum.PROCESSING
-        )
-
-        tracking_stream = global_video_stream_tracker.stream_video_tracking(
-            video_path=temp_video_path,
-            include_annotated_frame=params.get("include_annotated_frame", False),
-            show_labels=params.get("show_labels", False),
-            **params.get("tracker_extra", {})
-        )
-        recognition_stream = global_text_recognizer.recognize_text_from_tracking_stream(
-            tracking_stream=tracking_stream,
-            **params.get("recognizer_extra", {})
-        )
-
-        buffered_results = []
-
-        async for result in recognition_stream:
-            try:
-                await websocket.send_json(result)
+            raise VideoProcessingError("Missing video_url in init message.")
+        
+        VideoProcessingManager.add_session(self.session_id)
+        
+        try:
+            await self._download_video(video_url, params)
+            await self._process_video_recognition(params)
+            await self._finalize_processing()
+        except asyncio.CancelledError:
+            log.info(f"Video processing cancelled for session {self.session_id}")
+            raise VideoProcessingError("Processing was cancelled", should_close_ws=False)
+        except Exception as e:
+            if isinstance(e, VideoProcessingError):
+                raise
+            raise VideoProcessingError(f"Processing failed: {str(e)}")
+    
+    async def _download_video(self, video_url: str, params: Dict[str, Any]) -> None:
+        self.cancellation.check_cancellation()
+        
+        video_sessions_services.update_session_status(self.session_id, "processing")
+        
+        if not await self.ws_manager.send_json({
+            "status": "info", 
+            "message": "Downloading video..."
+        }):
+            raise VideoProcessingError("WebSocket connection lost during download start")
+        
+        # Run download in thread pool to avoid blocking
+        loop = asyncio.get_event_loop()
+        try:
+            downloader = VideoDownloader(max_duration=params.get("max_duration", 10))
+            self.temp_video_path = await loop.run_in_executor(
+                None, downloader.download_video_to_temp, video_url
+            )
+        except asyncio.CancelledError:
+            log.info("Download cancelled")
+            raise VideoProcessingError("Download was cancelled", should_close_ws=False)
+        
+        if self.temp_video_path is None:
+            raise VideoProcessingError("Failed to download video.")
+        
+        if not await self.ws_manager.send_json({
+            "status": "info", 
+            "message": "Video downloaded. Starting processing..."
+        }):
+            raise VideoProcessingError("WebSocket connection lost after download")
+    
+    async def _process_video_recognition(self, params: Dict[str, Any]) -> None:
+        recognition_args = self._build_recognition_args(params)
+        buffered_results: List[Any] = []
+        
+        try:
+            async for result in recognize_text_from_video(**recognition_args):
+                self.cancellation.check_cancellation()
+                
+                if not self.ws_manager.is_open:
+                    raise VideoProcessingError("WebSocket connection closed during processing")
+                
+                result_dict = self._build_result_dict(result)
+                
+                if not await self.ws_manager.send_json(result_dict):
+                    raise VideoProcessingError("Failed to send frame data")
+                
                 buffered_results.append(result)
-            except WebSocketDisconnect:
-                log.info(f"WebSocket disconnected by client for session {video_session_id}.")
-                break
-            except Exception as e:
-                log.error(f"Error sending message to WebSocket for session {video_session_id}: {e}")
-                break
-
-        await video_sessions_services.update_session_status(
-            video_session_id, ProcessingStatusEnum.COMPLETED
-        )
-        await websocket.send_json({"status": "info", "message": "Video processing completed."})
-
+                
+        except Exception as e:
+            if "Connect call failed" in str(e) or "Connection refused" in str(e):
+                raise VideoProcessingError(
+                    f"Cannot connect to Triton server: {str(e)}. Please ensure Triton is running."
+                )
+            raise VideoProcessingError(f"Video recognition failed: {str(e)}")
+        
+        await self._save_buffered_results(buffered_results)
+    
+    async def _finalize_processing(self) -> None:
+        video_sessions_services.update_session_status(self.session_id, "completed")
+        
+        if not await self.ws_manager.send_json({
+            "status": "info", 
+            "message": "Video processing completed."
+        }):
+            log.warning(f"Could not send completion message for session {self.session_id}")
+    
+    def _build_recognition_args(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "video_path": self.temp_video_path,
+            "model_path": params.get("model_path", None),
+            "tracker_type": params.get("tracker_type", "botsort"),
+            "tracker_config_path": params.get("tracker_config_path", None),
+            "window_size_ratio": params.get("window_size_ratio", (0.7, 0.7)),
+            "overlap_ratio": params.get("overlap_ratio", (0.1, 0.1)),
+            "img_size": params.get("img_size", 640),
+            "conf": params.get("conf", 0.1),
+            "iou": params.get("iou", 0.1),
+            "nms_global": params.get("nms_global", 0.1),
+            "classes": params.get("classes", [0]),
+            "device": params.get("device"),
+            "tracker_detection_source": params.get("tracker_detection_source", "main"),
+            "triton_stream_url": params.get("triton_stream_url", TRITON_HTTP_URL),
+            "triton_ws_url": params.get("triton_ws_url", TRITON_WS_URL),
+            "triton_batch_url": params.get("triton_batch_url", TRITON_HTTP_URL),
+            "triton_model_name": params.get("triton_model_name", "yolo"),
+            "triton_chunk_size": params.get("triton_chunk_size", 1),
+            "donut_detection_source": params.get("donut_detection_source", "main"),
+            "donut_triton_main_url": params.get("donut_triton_main_url", TRITON_HTTP_URL),
+            "donut_triton_stream_url": params.get("donut_triton_stream_url", TRITON_HTTP_URL),
+            "donut_triton_ws_url": params.get("donut_triton_ws_url", TRITON_WS_URL),
+            "donut_model_name": params.get("donut_model_name", "donut"),
+            "history_length": params.get("history_length", 8),
+            "include_annotated_frame": params.get("include_annotated_frame", False),
+            "show_labels": params.get("show_labels", False),
+            **params.get("tracker_extra", {})
+        }
+    
+    def _build_result_dict(self, result: Any) -> Dict[str, Any]:
+        result_dict = {
+            "frame_number": getattr(result, "frame_number", 0),
+            "tracked_objects": getattr(result, "tracked_objects", []),
+            "timestamp": getattr(result, 'timestamp', None),
+        }
+        if hasattr(result, 'annotated_frame') and result.annotated_frame is not None:
+            result_dict["has_frame"] = True
+        return result_dict
+    
+    async def _save_buffered_results(self, buffered_results: List[Any]) -> None:
         for frame_data in buffered_results:
             await frame_annotations_services.create_annotation_batch_from_recognition_results(
-                video_session_id, frame_data
+                self.session_id, frame_data
             )
-        log.info(f"Buffered results for session {video_session_id} (count: {len(buffered_results)}) would be saved to DB.")
+        log.info(f"Saved {len(buffered_results)} frames for session {self.session_id}")
+    
+    def cleanup(self) -> None:
+        VideoProcessingManager.remove_session(self.session_id)
+        
+        if self.temp_video_path and Path(self.temp_video_path).exists():
+            VideoDownloader._cleanup_temp_dir(str(Path(self.temp_video_path).parent))
+            log.info(f"Cleaned up temporary video file: {self.temp_video_path}")
 
+
+async def shutdown_handler():
+    """Graceful shutdown handler"""
+    def signal_handler(signum, frame):
+        log.info(f"Received signal {signum}, initiating graceful shutdown...")
+        VideoProcessingManager.signal_shutdown()
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+
+@app_server.websocket("/ws/video_recognition/{session_id}")
+async def websocket_video_recognition_endpoint(websocket: WebSocket, session_id: int) -> None:
+    ws_manager = WebSocketConnectionManager(websocket)
+    processor = VideoProcessor(session_id, ws_manager)
+    
+    try:
+        await ws_manager.accept()
+        log.info(f"WebSocket connection accepted for session_id: {session_id}")
+        
+        init_msg = await websocket.receive_json()
+        await processor.process_video_request(init_msg)
+        
     except WebSocketDisconnect:
-        log.info(f"WebSocket disconnected for session {video_session_id}.")
-        await video_sessions_services.fail_video_session(
-            video_session_id, "WebSocket disconnected unexpectedly."
+        log.info(f"WebSocket disconnected by client for session {session_id}")
+        video_sessions_services.fail_video_session(
+            session_id, "WebSocket disconnected by client"
         )
+        
+    except VideoProcessingError as e:
+        log.error(f"Video processing error for session {session_id}: {e}")
+        
+        if ws_manager.is_open:
+            await ws_manager.send_json({
+                "status": "error", 
+                "message": str(e)
+            })
+        
+        video_sessions_services.fail_video_session(session_id, str(e))
+        
+        if e.should_close_ws:
+            await ws_manager.close(code=status.WS_1011_INTERNAL_ERROR)
+            
     except Exception as e:
-        log.error(f"Error processing video recognition for session {video_session_id}: {e}", exc_info=True)
-        await websocket.send_json({"status": "error", "message": str(e)})
-        await websocket.close(code=status.WS_1011_INTERNAL_ERROR)
-        await video_sessions_services.fail_video_session(
-            video_session_id, f"Processing failed: {e}"
+        log.error(f"Unexpected error for session {session_id}: {e}", exc_info=True)
+        
+        if ws_manager.is_open:
+            await ws_manager.send_json({
+                "status": "error", 
+                "message": f"Unexpected server error: {str(e)}"
+            })
+        
+        video_sessions_services.fail_video_session(
+            session_id, f"Unexpected error: {str(e)}"
         )
+        await ws_manager.close(code=status.WS_1011_INTERNAL_ERROR)
+        
     finally:
-        if temp_video_path and Path(temp_video_path).exists():
-            VideoDownloader._cleanup_temp_dir(os.path.dirname(temp_video_path))
-            log.info(f"Temporary video file {temp_video_path} cleaned up.")
-        if not websocket.client_disconnected:
-            await websocket.close()
-        log.info(f"WebSocket connection closed for video_session_id: {video_session_id}.")
+        processor.cleanup()
+        if ws_manager.is_open:
+            await ws_manager.close()
+        log.info(f"WebSocket session {session_id} completed")
 
 
 @app_server.post("/auth/session/create", response_model=Dict[str, Any], tags=["Cookie"])
