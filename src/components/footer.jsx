@@ -1,52 +1,60 @@
-import { HStack, Text, Flex } from "@chakra-ui/react";
+import { HStack, Text, Flex, Divider } from "@chakra-ui/react";
 
 const Footer = () => {
   return (
     <Flex
       backgroundColor="#4B8BFC"
       width="100%"
-      minHeight={["60px", "70px", "80px", "90px", "100px"]} // Адаптивная минимальная высота
-      padding={["10px", "12px", "15px", "20px", "25px"]} // Адаптивные отступы
+      minHeight={["60px", "70px", "80px", "90px", "100px"]}
+      padding={["10px", "12px", "15px", "20px", "25px"]}
       justifyContent="center"
+      alignItems="center"
     >
       <HStack
-        justify={["center", "space-between"]} // На мобильных — по центру, на большем экране — space-between
-        width={["100%", "50%"]} // На мобильных — 100%, на более широких экранах — 50%
-        spacing={["10px", "20px"]} // Добавляем разные интервалы между элементами
-        textAlign={["center", "left"]} // На мобильных — по центру, на большем — слева
-        wrap="wrap" // Обеспечивает перенос на маленьких экранах
+        justify="space-between"
+        align="center"
+        width="100%"
+        maxWidth="1200px"
+        spacing={["15px", "20px", "30px"]}
+        wrap={["wrap", "wrap", "nowrap"]}
       >
         <Text
           color="#FFFFFF"
-          fontFamily="Montserrat"
-          fontSize={["14px", "16px", "18px"]} // Адаптивный размер шрифта
-          lineHeight="22px"
+          fontFamily="Montserrat, sans-serif"
+          fontSize={["12px", "14px", "16px"]}
+          lineHeight="1.4"
           fontWeight="500"
-          width="auto" // Убираем фиксированную ширину для текста
-          textAlign={["center", "right"]} // Выравнивание для мобильных и больших экранов
+          textAlign={["center", "center", "left"]}
+          flex="1"
         >
-          Команда «Придумать название»
+          Команда «Пришли пить кофе» | ФКН | ВШЭ | 2025
         </Text>
 
-        <HStack
-          onClick={() => {
-            window.scrollTo(0, 0);
+        <Divider
+          orientation="vertical"
+          height={["20px", "25px", "30px"]}
+          borderColor="rgba(255, 255, 255, 0.3)"
+          borderWidth="1px"
+          display={["none", "none", "block"]}
+        />
+
+        <Text
+          color="#FFFFFF"
+          fontFamily="Montserrat, sans-serif"
+          fontSize={["12px", "14px", "16px"]}
+          lineHeight="1.4"
+          fontWeight="500"
+          textAlign={["center", "center", "right"]}
+          flex="1"
+          cursor="pointer"
+          onClick={() => window.scrollTo(0, 0)}
+          _hover={{
+            opacity: 0.8,
+            transition: "opacity 0.2s ease"
           }}
-          spacing={["5px", "10px"]} // Добавляем адаптивный промежуток между элементами
-          justify="center" // Выравниваем по центру для мобильных
         >
-          <Text
-            color="#FFFFFF"
-            fontFamily="Montserrat"
-            fontSize={["14px", "16px", "18px"]} // Адаптивный размер шрифта
-            lineHeight="22px"
-            fontWeight="500"
-            width="auto" // Убираем фиксированную ширину
-            textAlign={["center", "left"]} // Для мобильных — по центру, для больших экранов — слева
-          >
-            Проект по машинному обучению МТС AI
-          </Text>
-        </HStack>
+          Проект «FrameReader» не спонсирован кафедрой МТС
+        </Text>
       </HStack>
     </Flex>
   );

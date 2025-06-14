@@ -31,6 +31,7 @@
     "react-search-autocomplete": "^8.5.2",
     "react-select": "^5.8.0",
     "react-select-async-paginate": "^0.7.3",
+    "rutube-player": "^1.0.5",
     "tesseract.js": "^5.0.5",
     "web-vitals": "^2.1.4",
     "yup": "^1.3.2"

@@ -1,42 +1,139 @@
-import { VStack, Box, Text } from "@chakra-ui/react";
+import { VStack, Box, Alert, AlertIcon, AlertTitle, AlertDescription, CloseButton } from "@chakra-ui/react";
 import useWindowDimensions from "../hooks/window_dimensions";
-import ContentSection from "../components/maincontent";
-import TagSection from "../components/tagsectionmain";
-import { sendInference } from "../API/services/inference_services";
-import React, { useState, useEffect } from "react";
-
+import ContentSection from "../components/main_content";
+import VideoPlayerWithAnnotations from "../components/video_player";
+import React, { useState, useEffect, useCallback, useRef } from "react";
+import SessionService from "../API/services/session_service";
+import VideoService from "../API/services/video_service";
 
 const MainPage = () => {
   const { height } = useWindowDimensions();
-  const [response, setResponse] = useState(null); // Состояние для ответа от API
-  const [error, setError] = useState(null); // Состояние для ошибок
+  const [userId, setUserId] = useState(null);
+  const [videoSessionId, setVideoSessionId] = useState(null);
+  const [processingStatus, setProcessingStatus] = useState("idle");
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [videoUrl, setVideoUrl] = useState("");
+  const [frameData, setFrameData] = useState([]);
+  const wsConnectionRef = useRef(null);
 
-  // Функция для получения тегов с сервера
-  const fetchTags = async (url) => {
-    try {
-      const data = await sendInference(url);
-      console.log("Inference response:", data);
-      setResponse(data); // Сохраняем преобразованные данные в состояние
-    } catch (err) {
-      console.error("Failed to fetch inference data:", err);
-      setError(err); // Сохраняем ошибку в состоянии
-    }
-  };
-
-  // Эффект для обработки ошибки
   useEffect(() => {
-    if (error) {
-      // В случае ошибки устанавливаем ответ с деталями ошибки
-      setResponse({
-        Error: {
-          Details: [
-            "Failed fetch data",
-            "Check video URL"
-          ]
-        }
-      });
+    const initSession = async () => {
+      try {
+        const sessionInfo = await SessionService.createOrGetSession();
+        setUserId(sessionInfo.user_id);
+        console.log("Session initialized:", sessionInfo);
+      } catch (error) {
+        console.error("Failed to initialize session:", error);
+        setErrorMessage("Failed to initialize session. Please try again later.");
+      }
+    };
+    initSession();
+  }, []);
+
+  const handleProcessVideo = useCallback(async (url) => {
+    if (!userId) {
+      setErrorMessage("User session not initialized. Please refresh the page.");
+      return;
     }
-  }, [error]); // Эффект срабатывает при изменении ошибки
+
+    setVideoUrl(url);
+    setProcessingStatus("processing");
+    setErrorMessage(null);
+    setVideoSessionId(null);
+    setFrameData([]);
+
+    try {
+      const { session, sessionId } = await VideoService.startVideoProcessing(userId, url);
+      
+      setVideoSessionId(sessionId);
+
+      const wsConnection = await VideoService.createWebSocketAndInitialize(sessionId, url);
+      wsConnectionRef.current = wsConnection;
+
+      wsConnection.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          
+          if (data.status === "error") {
+            setProcessingStatus("failed");
+            setErrorMessage(data.message);
+            return;
+          }
+
+          if (data.status === "info") {
+            console.log("Processing update:", data.message);
+            if (data.message && data.message.includes("completed")) {
+              setProcessingStatus("completed");
+            }
+            return;
+          }
+
+          if (data.frame_number !== undefined) {
+            console.log("Frame data received:", data);
+            setFrameData(prev => [...prev, data]);
+          }
+        } catch (parseError) {
+          console.error("Error parsing WebSocket message:", parseError);
+        }
+      };
+
+      wsConnection.onclose = (event) => {
+        console.log("WebSocket connection closed", event.code, event.reason);
+        wsConnectionRef.current = null;
+      };
+
+      wsConnection.onerror = (error) => {
+        console.error("WebSocket error:", error);
+        setProcessingStatus("failed");
+        setErrorMessage("Connection error during processing");
+        wsConnectionRef.current = null;
+      };
+      
+      console.log("Video processing started:", session);
+    } catch (error) {
+      console.error("Failed to start video processing:", error);
+      setProcessingStatus("failed");
+      setErrorMessage(
+        error.response?.data?.detail || error.message || "Failed to start video processing. Please check the URL and try again."
+      );
+    }
+  }, [userId]);
+
+  const handleProcessingComplete = useCallback(async () => {
+    setProcessingStatus("completed");
+    console.log("Video processing completed.");
+    
+    if (wsConnectionRef.current) {
+      wsConnectionRef.current.close();
+      wsConnectionRef.current = null;
+    }
+    
+    if (userId) {
+      try {
+        await VideoService.incrementUserVideos(userId);
+      } catch (error) {
+        console.error("Failed to increment user video count:", error);
+      }
+    }
+  }, [userId]);
+
+  const handleProcessingError = useCallback((message) => {
+    setProcessingStatus("failed");
+    setErrorMessage(message);
+    
+    if (wsConnectionRef.current) {
+      wsConnectionRef.current.close();
+      wsConnectionRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (wsConnectionRef.current && wsConnectionRef.current.readyState === WebSocket.OPEN) {
+        wsConnectionRef.current.close();
+      }
+    };
+  }, []);
 
   return (
     <VStack
@@ -59,16 +156,29 @@ const MainPage = () => {
         alignItems="center"
         bg="#ffffff"
       >
-        <ContentSection onFetch={fetchTags} />
-        <Box mt={height > 600 ? height * 0.05 : "20px"}>
-          {response ? (
-            <TagSection video={response} />
-          ) : (
-            <Text fontSize="18px" color="#666">
-              Enter a video URL to see tags.
-            </Text>
-          )}
-        </Box>
+        {errorMessage && (
+          <Alert status="error" mb={4}>
+            <AlertIcon />
+            <AlertTitle mr={2}>Error!</AlertTitle>
+            <AlertDescription>{errorMessage}</AlertDescription>
+            <CloseButton position="absolute" right="8px" top="8px" onClick={() => setErrorMessage(null)} />
+          </Alert>
+        )}
+
+        <ContentSection onProcessVideo={handleProcessVideo} processingStatus={processingStatus} />
+
+        {(processingStatus === "processing" || processingStatus === "completed") && 
+         videoSessionId && 
+         videoUrl && (
+          <VideoPlayerWithAnnotations
+            videoUrl={videoUrl || ""}
+            videoSessionId={videoSessionId}
+            frameData={frameData}
+            processingStatus={processingStatus}
+            onProcessingComplete={handleProcessingComplete}
+            onProcessingError={handleProcessingError}
+          />
+        )}
       </Box>
     </VStack>
   );

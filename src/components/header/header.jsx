@@ -35,7 +35,7 @@ const Header = () => {
           alt="Logo"
         />
       </Box>
-      {/* Логотип и название NaRuTagAI */}
+      {/* Логотип и название */}
       <HStack
         bg="transparent"
         ml={{ base: "none", sm: "100px" }}
@@ -53,7 +53,7 @@ const Header = () => {
           lineHeight="22px"
           color="#4B8BFC"
         >
-          NaRuTagAI
+          FrameReader
         </Text>
       </HStack>
 

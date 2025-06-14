@@ -1,6 +1,6 @@
 {
   "name": "FrameReader",
-  "short_name": "FReader",
+  "short_name": "FR",
   "icons": [
     {
       "src": "/public/web-app-manifest-192x192.png",
