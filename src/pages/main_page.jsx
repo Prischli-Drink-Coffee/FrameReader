@@ -13,8 +13,10 @@ const MainPage = () => {
   const [processingStatus, setProcessingStatus] = useState("idle");
   const [errorMessage, setErrorMessage] = useState(null);
   const [videoUrl, setVideoUrl] = useState("");
-  const [frameData, setFrameData] = useState([]);
+  const [frameDataStream, setFrameDataStream] = useState(null);
+  const [allFrameData, setAllFrameData] = useState([]);
   const wsConnectionRef = useRef(null);
+  const frameCounterRef = useRef(0);
 
   useEffect(() => {
     const initSession = async () => {
@@ -30,25 +32,51 @@ const MainPage = () => {
     initSession();
   }, []);
 
+  const resetVideoProcessing = useCallback(() => {
+    setVideoUrl("");
+    setProcessingStatus("idle");
+    setErrorMessage(null);
+    setVideoSessionId(null);
+    setFrameDataStream(null);
+    setAllFrameData([]);
+    frameCounterRef.current = 0;
+    
+    if (wsConnectionRef.current) {
+      wsConnectionRef.current.close();
+      wsConnectionRef.current = null;
+    }
+  }, []);
+
+  const handleNewFrameData = useCallback((newFrameData) => {
+    frameCounterRef.current += 1;
+    
+    console.log(`Frame data received #${frameCounterRef.current}:`, newFrameData);
+    
+    setFrameDataStream(newFrameData);
+    setAllFrameData(prev => [...prev, newFrameData]);
+  }, []);
+
   const handleProcessVideo = useCallback(async (url) => {
     if (!userId) {
       setErrorMessage("User session not initialized. Please refresh the page.");
       return;
     }
 
+    resetVideoProcessing();
+    
     setVideoUrl(url);
     setProcessingStatus("processing");
-    setErrorMessage(null);
-    setVideoSessionId(null);
-    setFrameData([]);
 
     try {
       const { session, sessionId } = await VideoService.startVideoProcessing(userId, url);
-      
       setVideoSessionId(sessionId);
 
       const wsConnection = await VideoService.createWebSocketAndInitialize(sessionId, url);
       wsConnectionRef.current = wsConnection;
+
+      wsConnection.onopen = () => {
+        console.log("WebSocket connection established for session:", sessionId);
+      };
 
       wsConnection.onmessage = (event) => {
         try {
@@ -56,21 +84,22 @@ const MainPage = () => {
           
           if (data.status === "error") {
             setProcessingStatus("failed");
-            setErrorMessage(data.message);
+            setErrorMessage(data.message || "Processing failed");
             return;
           }
 
           if (data.status === "info") {
             console.log("Processing update:", data.message);
-            if (data.message && data.message.includes("completed")) {
+            if (data.message?.includes("completed")) {
               setProcessingStatus("completed");
+            } else if (data.message?.includes("started")) {
+              console.log("Video processing started successfully");
             }
             return;
           }
 
-          if (data.frame_number !== undefined) {
-            console.log("Frame data received:", data);
-            setFrameData(prev => [...prev, data]);
+          if (data.frame_number !== undefined && data.timestamp !== undefined) {
+            handleNewFrameData(data);
           }
         } catch (parseError) {
           console.error("Error parsing WebSocket message:", parseError);
@@ -78,7 +107,17 @@ const MainPage = () => {
       };
 
       wsConnection.onclose = (event) => {
-        console.log("WebSocket connection closed", event.code, event.reason);
+        console.log("WebSocket connection closed:", {
+          code: event.code,
+          reason: event.reason,
+          wasClean: event.wasClean
+        });
+        
+        if (event.code !== 1000 && processingStatus === "processing") {
+          setErrorMessage("Connection lost during processing");
+          setProcessingStatus("failed");
+        }
+        
         wsConnectionRef.current = null;
       };
 
@@ -94,14 +133,16 @@ const MainPage = () => {
       console.error("Failed to start video processing:", error);
       setProcessingStatus("failed");
       setErrorMessage(
-        error.response?.data?.detail || error.message || "Failed to start video processing. Please check the URL and try again."
+        error.response?.data?.detail || 
+        error.message || 
+        "Failed to start video processing. Please check the URL and try again."
       );
     }
-  }, [userId]);
+  }, [userId, resetVideoProcessing, handleNewFrameData, processingStatus]);
 
   const handleProcessingComplete = useCallback(async () => {
+    console.log(`Video processing completed. Total frames processed: ${frameCounterRef.current}`);
     setProcessingStatus("completed");
-    console.log("Video processing completed.");
     
     if (wsConnectionRef.current) {
       wsConnectionRef.current.close();
@@ -111,6 +152,7 @@ const MainPage = () => {
     if (userId) {
       try {
         await VideoService.incrementUserVideos(userId);
+        console.log("User video count incremented successfully");
       } catch (error) {
         console.error("Failed to increment user video count:", error);
       }
@@ -118,6 +160,7 @@ const MainPage = () => {
   }, [userId]);
 
   const handleProcessingError = useCallback((message) => {
+    console.error("Processing error:", message);
     setProcessingStatus("failed");
     setErrorMessage(message);
     
@@ -127,13 +170,23 @@ const MainPage = () => {
     }
   }, []);
 
+  const closeErrorAlert = useCallback(() => {
+    setErrorMessage(null);
+  }, []);
+
   useEffect(() => {
     return () => {
-      if (wsConnectionRef.current && wsConnectionRef.current.readyState === WebSocket.OPEN) {
-        wsConnectionRef.current.close();
+      if (wsConnectionRef.current?.readyState === WebSocket.OPEN) {
+        wsConnectionRef.current.close(1000, "Component unmounting");
       }
     };
   }, []);
+
+  const shouldShowPlayer = Boolean(
+    videoUrl && 
+    videoSessionId && 
+    (processingStatus === "processing" || processingStatus === "completed")
+  );
 
   return (
     <VStack
@@ -157,23 +210,37 @@ const MainPage = () => {
         bg="#ffffff"
       >
         {errorMessage && (
-          <Alert status="error" mb={4}>
+          <Alert 
+            status="error" 
+            mb={4}
+            borderRadius="12px"
+            boxShadow="0 4px 12px rgba(245, 101, 101, 0.15)"
+          >
             <AlertIcon />
-            <AlertTitle mr={2}>Error!</AlertTitle>
-            <AlertDescription>{errorMessage}</AlertDescription>
-            <CloseButton position="absolute" right="8px" top="8px" onClick={() => setErrorMessage(null)} />
+            <Box flex="1">
+              <AlertTitle mr={2}>Ошибка обработки!</AlertTitle>
+              <AlertDescription>{errorMessage}</AlertDescription>
+            </Box>
+            <CloseButton 
+              position="absolute" 
+              right="8px" 
+              top="8px" 
+              onClick={closeErrorAlert}
+            />
           </Alert>
         )}
 
-        <ContentSection onProcessVideo={handleProcessVideo} processingStatus={processingStatus} />
+        <ContentSection 
+          onProcessVideo={handleProcessVideo} 
+          processingStatus={processingStatus} 
+        />
 
-        {(processingStatus === "processing" || processingStatus === "completed") && 
-         videoSessionId && 
-         videoUrl && (
+        {shouldShowPlayer && (
           <VideoPlayerWithAnnotations
-            videoUrl={videoUrl || ""}
+            videoUrl={videoUrl}
             videoSessionId={videoSessionId}
-            frameData={frameData}
+            frameDataStream={frameDataStream}
+            allFrameData={allFrameData}
             processingStatus={processingStatus}
             onProcessingComplete={handleProcessingComplete}
             onProcessingError={handleProcessingError}

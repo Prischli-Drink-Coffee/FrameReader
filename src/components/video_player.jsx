@@ -1,331 +1,940 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
-import { Box, Text, Spinner, Flex } from "@chakra-ui/react";
-import { Instance } from "../API/instance";
+import { Box, Text, Spinner, Flex, Alert, AlertIcon } from "@chakra-ui/react";
+import { keyframes } from "@emotion/react";
+
+const fadeInUp = keyframes`
+  from {
+    opacity: 0;
+    transform: translateY(30px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+`;
+
+const scaleIn = keyframes`
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+`;
+
+const pulse = keyframes`
+  0% {
+    box-shadow: 0 0 0 0 rgba(75, 139, 252, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 15px rgba(75, 139, 252, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(75, 139, 252, 0);
+  }
+`;
+
+const glowBorder = keyframes`
+  0% {
+    border-color: #4B8BFC;
+    box-shadow: 0 0 20px rgba(75, 139, 252, 0.3);
+  }
+  50% {
+    border-color: #667eea;
+    box-shadow: 0 0 30px rgba(102, 126, 234, 0.5);
+  }
+  100% {
+    border-color: #4B8BFC;
+    box-shadow: 0 0 20px rgba(75, 139, 252, 0.3);
+  }
+`;
+
+const textFlow = keyframes`
+  0% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+`;
 
 const VideoPlayerWithAnnotations = ({ 
   videoUrl, 
   videoSessionId, 
   onProcessingComplete, 
-  onProcessingError 
+  onProcessingError,
+  frameDataStream,
+  allFrameData,
+  processingStatus: externalProcessingStatus
 }) => {
-  const playerContainerRef = useRef(null);
   const canvasRef = useRef(null);
-  const wsRef = useRef(null);
+  const playerContainerRef = useRef(null);
   const rutubePlayerRef = useRef(null);
+  const frameQueueRef = useRef([]);
+  const currentFrameIndexRef = useRef(0);
+  const playbackTimeoutRef = useRef(null);
+  const isVideoPlayingRef = useRef(false);
   
-  const [statusMessage, setStatusMessage] = useState("Connecting to processing server...");
+  const [statusMessage, setStatusMessage] = useState("Инициализация плеера...");
   const [currentAnnotations, setCurrentAnnotations] = useState([]);
-  const [recognizedText, setRecognizedText] = useState("");
-  const [videoDimensions, setVideoDimensions] = useState({ width: 0, height: 0 });
+  const [recognizedTexts, setRecognizedTexts] = useState([]);
   const [playerReady, setPlayerReady] = useState(false);
-  const [annotationsBuffer, setAnnotationsBuffer] = useState([]);
-  const [currentFrameTime, setCurrentFrameTime] = useState(0);
-
-  const FPS = 5;
+  const [error, setError] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentFrameData, setCurrentFrameData] = useState(null);
+  const [waitingForFrame, setWaitingForFrame] = useState(false);
+  const [uniqueTexts, setUniqueTexts] = useState(new Set());
+  const [allFoundTexts, setAllFoundTexts] = useState([]);
 
   const extractVideoId = useCallback((url) => {
+    if (!url || typeof url !== 'string') {
+      throw new Error("Invalid video URL");
+    }
+    
     const match = url.match(/rutube\.ru\/video\/([a-f0-9]{32})/);
-    return match ? match[1] : null;
+    if (!match) {
+      throw new Error("Could not extract video ID from URL");
+    }
+    
+    return match[1];
   }, []);
 
-  const drawAnnotations = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !playerReady) return;
-
-    const context = canvas.getContext("2d");
-    context.clearRect(0, 0, canvas.width, canvas.height);
-
-    currentAnnotations.forEach(annotation => {
-      if (annotation.box) {
-        const [x1, y1, x2, y2] = annotation.box;
-        const width = x2 - x1;
-        const height = y2 - y1;
-
-        context.strokeStyle = annotation.color || "red";
-        context.lineWidth = 2;
-        context.strokeRect(x1, y1, width, height);
-
-        if (annotation.recognized_text) {
-          context.fillStyle = annotation.color || "red";
-          context.font = "16px Arial";
-          context.fillText(annotation.recognized_text, x1, y1 > 10 ? y1 - 5 : y1 + 15);
-        }
-      }
-    });
-  }, [currentAnnotations, playerReady]);
-
   const initializeRutubePlayer = useCallback(() => {
-    const videoId = extractVideoId(videoUrl);
-    if (!videoId || !window.Rutube) {
-      console.error("Video ID not found or Rutube library not loaded");
-      onProcessingError("Failed to initialize video player");
-      return;
-    }
+    if (typeof window === 'undefined') return;
+
+    const Rutube = function () {
+      const EMBEDED_API_URI = '//rutube.ru/play/embed/';
+      const PREFFIX_PLAYER_ID = 'rt-';
+
+      this.Player = function (selector, config) {
+        if (!selector) {
+          throw new Error('The Player element must be specified.');
+        }
+
+        this.selector = selector;
+        this.config = config;
+        this.duration = null;
+        this.videoCurrentDuration = 0;
+
+        this.renderOnPage();
+      };
+
+      this.renderOnPage = function () {
+        const options = {
+          id: PREFFIX_PLAYER_ID + this.selector,
+          width: this.config.width || 720,
+          height: this.config.height || 405,
+          src: EMBEDED_API_URI + this.config.videoId + '?autoplay=1',
+          frameBorder: 0,
+          allow: 'autoplay',
+          allowFullScreen: '',
+          webkitallowfullscreen: '',
+          mozallowfullscreen: '',
+        };
+
+        const element = document.createElement('iframe');
+
+        for (let property in options) {
+          element.setAttribute(property, options[property]);
+        }
+
+        const container = document.getElementById(this.selector);
+        if (container) {
+          container.innerHTML = '';
+          container.appendChild(element);
+        }
+      };
+
+      this.triggerEventObserver = function (env, args = null) {
+        if (!this.config.events || !this.config.events[env]) return;
+        return this.config.events[env](args);
+      };
+
+      this.setPlayerState = function (status) {
+        const playerState = {
+          PLAYING: 0,
+          PAUSED: 0,
+          STOPPED: 0,
+          ENDED: 0,
+        };
+
+        for (let state in playerState) {
+          if (state.toLowerCase() === status.toLowerCase()) {
+            playerState[state] = 1;
+            break;
+          }
+        }
+
+        return { playerState };
+      };
+
+      this.currentDuration = function () {
+        return this.videoCurrentDuration;
+      };
+
+      for (let [iterator, type] of Object.entries({
+        play: 'play',
+        pause: 'pause',
+        stop: 'stop',
+        seekTo: 'setCurrentTime',
+        changeVideo: 'changeVideo',
+        mute: 'mute',
+        unMute: 'unMute',
+        setVolume: 'setVolume',
+      })) {
+        this[iterator] = function (data = {}) {
+          const iframe = document.getElementById(PREFFIX_PLAYER_ID + this.selector);
+          if (iframe && iframe.contentWindow) {
+            iframe.contentWindow.postMessage(
+              JSON.stringify({
+                type: 'player:' + type,
+                data: data,
+              }),
+              '*'
+            );
+          }
+        };
+      }
+
+      this.playerEvent = function (receivedMessage) {
+        switch (receivedMessage.type) {
+          case 'player:ready':
+            this.triggerEventObserver('onReady', {
+              videoId: receivedMessage.data.videoId,
+              clientId: receivedMessage.data.clientId,
+            });
+            break;
+          case 'player:changeState':
+          case 'player:playComplete':
+            this.triggerEventObserver(
+              'onStateChange',
+              this.setPlayerState(receivedMessage.data.state || 'ENDED')
+            );
+            break;
+          case 'player:currentTime':
+            this.videoCurrentDuration = receivedMessage.data.time;
+            break;
+        }
+      };
+
+      window.addEventListener(
+        'message',
+        function (event) {
+          try {
+            const receivedMessage = JSON.parse(event.data);
+            this.playerEvent(receivedMessage);
+          } catch (e) {
+            console.warn('Failed to parse player message:', e);
+          }
+        }.bind(this),
+        false
+      );
+    };
+
+    window.Rutube = Rutube;
 
     try {
-      const rt = new window.Rutube();
-      rutubePlayerRef.current = rt;
-
-      rt.Player('rutube-player', {
+      const videoId = extractVideoId(videoUrl);
+      const rt = new Rutube();
+      
+      const playerConfig = {
         width: 840,
         height: 473,
         videoId: videoId,
         events: {
-          onReady: 'onPlayerReady',
-          onStateChange: 'onPlayerStateChange'
+          onReady: (event) => {
+            console.log('Rutube Player готов:', event);
+            setPlayerReady(true);
+            setStatusMessage("Плеер готов! 🎬");
+            
+            const canvas = canvasRef.current;
+            if (canvas) {
+              canvas.width = 840;
+              canvas.height = 473;
+            }
+
+            setTimeout(() => {
+              if (rutubePlayerRef.current) {
+                rutubePlayerRef.current.play();
+                isVideoPlayingRef.current = true;
+                console.log('Запускаем видео автоматически');
+              }
+            }, 1000);
+          },
+          onStateChange: (event) => {
+            console.log('Состояние плеера изменилось:', event);
+            
+            if (event.playerState.PLAYING) {
+              isVideoPlayingRef.current = true;
+              console.log('Видео воспроизводится');
+              
+              if (frameQueueRef.current.length > 0 && !isPlaying) {
+                startSynchronizedPlayback();
+              }
+            }
+            
+            if (event.playerState.PAUSED) {
+              isVideoPlayingRef.current = false;
+              console.log('Видео поставлено на паузу');
+            }
+            
+            if (event.playerState.ENDED) {
+              isVideoPlayingRef.current = false;
+              console.log('Видео завершено');
+              if (onProcessingComplete) {
+                onProcessingComplete();
+              }
+            }
+          }
+        }
+      };
+
+      rt.Player('rutube-player-container', playerConfig);
+      rutubePlayerRef.current = rt;
+      
+      console.log('Rutube Player инициализирован с videoId:', videoId);
+      
+    } catch (error) {
+      console.error('Ошибка инициализации Rutube Player:', error);
+      setError(`Ошибка инициализации плеера: ${error.message}`);
+    }
+  }, [videoUrl, extractVideoId, onProcessingComplete]);
+
+  const scaleCoordinates = useCallback((box, displayWidth, displayHeight) => {
+    const originalWidth = 1920;
+    const originalHeight = 1080;
+    
+    const scaleX = displayWidth / originalWidth;
+    const scaleY = displayHeight / originalHeight;
+    
+    return [
+      box[0] * scaleX,
+      box[1] * scaleY,
+      box[2] * scaleX,
+      box[3] * scaleY
+    ];
+  }, []);
+
+  const drawAnnotations = useCallback(() => {
+    try {
+      const canvas = canvasRef.current;
+      if (!canvas || !currentAnnotations.length) return;
+
+      const context = canvas.getContext("2d");
+      if (!context) return;
+
+      context.clearRect(0, 0, canvas.width, canvas.height);
+
+      const displayWidth = canvas.offsetWidth;
+      const displayHeight = canvas.offsetHeight;
+
+      currentAnnotations.forEach((annotation) => {
+        if (annotation?.box && Array.isArray(annotation.box) && annotation.box.length >= 4) {
+          const scaledBox = scaleCoordinates(annotation.box, displayWidth, displayHeight);
+          const [x1, y1, x2, y2] = scaledBox;
+          const width = x2 - x1;
+          const height = y2 - y1;
+
+          const colors = ['#4B8BFC', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57'];
+          const color = colors[annotation.track_id % colors.length];
+
+          context.strokeStyle = color;
+          context.lineWidth = 3;
+          context.setLineDash([8, 4]);
+          context.strokeRect(x1, y1, width, height);
+
+          context.fillStyle = color;
+          context.fillRect(x1, y1 - 30, Math.max(width, 100), 30);
+
+          context.fillStyle = 'white';
+          context.font = 'bold 14px Montserrat, sans-serif';
+          context.textAlign = 'left';
+          context.fillText(
+            `ID: ${annotation.track_id} (${(annotation.confidence * 100).toFixed(1)}%)`,
+            x1 + 5,
+            y1 - 10
+          );
+
+          if (annotation.recognized_text) {
+            context.fillStyle = 'rgba(75, 139, 252, 0.9)';
+            context.fillRect(x1, y2, width, 25);
+            context.fillStyle = 'white';
+            context.font = '12px Montserrat, sans-serif';
+            context.fillText(annotation.recognized_text, x1 + 5, y2 + 17);
+          }
         }
       });
-
-      window.onPlayerReady = (event) => {
-        console.log('Rutube player ready:', event);
-        setPlayerReady(true);
-        setStatusMessage("Video player ready. Waiting for annotations...");
-        setVideoDimensions({ width: 840, height: 473 });
-        
-        const canvas = canvasRef.current;
-        if (canvas) {
-          canvas.width = 840;
-          canvas.height = 473;
-        }
-      };
-
-      window.onPlayerStateChange = (event) => {
-        console.log('Player state change:', event);
-        if (rutubePlayerRef.current) {
-          const currentTime = rutubePlayerRef.current.currentDuration();
-          if (currentTime !== undefined) {
-            setCurrentFrameTime(currentTime);
-          }
-        }
-      };
-
     } catch (error) {
-      console.error("Error initializing Rutube player:", error);
-      onProcessingError("Failed to initialize video player");
+      console.warn("Error drawing annotations:", error);
     }
-  }, [videoUrl, extractVideoId, onProcessingError]);
+  }, [currentAnnotations, scaleCoordinates]);
 
-  useEffect(() => {
-    if (!videoSessionId) return;
-
-    const baseUrl = Instance.defaults?.baseURL || 'http://localhost:8010/server';
-    const wsUrl = `${baseUrl.replace(/^http/, 'ws')}/ws/video_recognition/${videoSessionId}`;
+  const processFrameData = useCallback((frameData) => {
+    console.log('Processing frame data:', frameData);
     
-    wsRef.current = new WebSocket(wsUrl);
-
-    wsRef.current.onopen = () => {
-      setStatusMessage("WebSocket connected. Sending video URL...");
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ 
-          video_url: videoUrl, 
-          params: {
-            max_duration: 60,
-            tracker_type: "botsort",
-            window_size_ratio: [0.7, 0.7],
-            overlap_ratio: [0.1, 0.1],
-            img_size: 640,
-            conf: 0.1,
-            iou: 0.1,
-            nms_global: 0.1,
-            classes: [0],
-            include_annotated_frame: false,
-            show_labels: false,
-          }
-        }));
-      }
-    };
-
-    wsRef.current.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        console.log("WS Message:", message);
-
-        if (message.status) {
-          setStatusMessage(message.message || "Processing...");
-          if (message.status === "error") {
-            onProcessingError(message.message);
-            return;
-          }
-          if (message.message && message.message.includes("completed")) {
-            setStatusMessage("Video processing completed.");
-            onProcessingComplete();
-            return;
-          }
-        } else if (message.frame_number !== undefined) {
-          setAnnotationsBuffer(prev => [...prev, {
-            timestamp: message.timestamp || 0,
-            tracked_objects: message.tracked_objects || [],
-            frame_number: message.frame_number
-          }]);
-        }
-      } catch (error) {
-        console.error("Error parsing WebSocket message:", error);
-      }
-    };
-
-    wsRef.current.onclose = (event) => {
-      console.log("WebSocket closed:", event);
-      if (!event.wasClean && event.code !== 1000) {
-        onProcessingError("WebSocket connection closed unexpectedly.");
-      }
-    };
-
-    wsRef.current.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      onProcessingError("WebSocket error during processing.");
-    };
-
-    return () => {
-      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-        wsRef.current.close();
-      }
-    };
-  }, [videoSessionId, videoUrl, onProcessingComplete, onProcessingError]);
-
-  useEffect(() => {
-    if (window.Rutube) {
-      initializeRutubePlayer();
-    } else {
-      const checkRutube = setInterval(() => {
-        if (window.Rutube) {
-          clearInterval(checkRutube);
-          initializeRutubePlayer();
-        }
-      }, 100);
-
-      setTimeout(() => {
-        clearInterval(checkRutube);
-        if (!window.Rutube) {
-          onProcessingError("Rutube player library failed to load");
-        }
-      }, 5000);
-    }
-
-    return () => {
-      if (window.onPlayerReady) {
-        delete window.onPlayerReady;
-      }
-      if (window.onPlayerStateChange) {
-        delete window.onPlayerStateChange;
-      }
-    };
-  }, [initializeRutubePlayer, onProcessingError]);
-
-  useEffect(() => {
-    if (!playerReady || annotationsBuffer.length === 0) return;
-
-    const processBuffer = () => {
-      const annotationsForCurrentTime = annotationsBuffer.filter(
-        (ann) => Math.abs(ann.timestamp - currentFrameTime) < (1 / FPS)
-      );
-
-      if (annotationsForCurrentTime.length > 0) {
-        const latestAnnotation = annotationsForCurrentTime.reduce((prev, current) =>
-          (prev.timestamp > current.timestamp) ? prev : current
-        );
+    setCurrentFrameData(frameData);
+    setCurrentAnnotations(frameData.tracked_objects || []);
+    
+    const newTexts = frameData.tracked_objects
+      ?.filter(obj => obj.recognized_text && obj.recognized_text.trim())
+      ?.map(obj => obj.recognized_text.trim()) || [];
+    
+    if (newTexts.length > 0) {
+      // Обновляем бегущую строку
+      setRecognizedTexts(prev => [...prev, ...newTexts].slice(-10));
+      
+      // Добавляем уникальные тексты
+      setUniqueTexts(prevUnique => {
+        const updatedUnique = new Set(prevUnique);
+        const newUniqueTexts = [];
         
-        setCurrentAnnotations(latestAnnotation.tracked_objects || []);
-        setRecognizedText(
-          latestAnnotation.tracked_objects
-            ?.map(obj => obj.recognized_text)
-            .filter(Boolean)
-            .join(" ") || ""
-        );
-      }
-
-      drawAnnotations();
-    };
-
-    const intervalId = setInterval(processBuffer, 1000 / FPS);
-
-    return () => {
-      clearInterval(intervalId);
-    };
-  }, [playerReady, annotationsBuffer, currentFrameTime, drawAnnotations]);
-
-  useEffect(() => {
-    let syncInterval;
-    
-    if (playerReady && rutubePlayerRef.current) {
-      syncInterval = setInterval(() => {
-        try {
-          const currentTime = rutubePlayerRef.current.currentDuration();
-          if (currentTime !== undefined && currentTime !== currentFrameTime) {
-            setCurrentFrameTime(currentTime);
+        newTexts.forEach(text => {
+          if (!updatedUnique.has(text)) {
+            updatedUnique.add(text);
+            newUniqueTexts.push(text);
           }
-        } catch (error) {
-          console.warn("Error getting player time:", error);
+        });
+        
+        if (newUniqueTexts.length > 0) {
+          setAllFoundTexts(prev => [...prev, ...newUniqueTexts]);
         }
-      }, 200);
+        
+        return updatedUnique;
+      });
+    }
+  }, []);
+
+  const syncVideoToTime = useCallback((targetTime) => {
+    if (rutubePlayerRef.current && isVideoPlayingRef.current) {
+      const currentTime = rutubePlayerRef.current.currentDuration();
+      const timeDiff = Math.abs(currentTime - targetTime);
+      
+      if (timeDiff > 1.0) {
+        console.log(`Синхронизация: текущее время ${currentTime}s, целевое ${targetTime}s`);
+        rutubePlayerRef.current.seekTo({ time: targetTime });
+      }
+    }
+  }, []);
+
+  const controlVideoPlayback = useCallback(() => {
+    const currentFrameIndex = currentFrameIndexRef.current;
+    const nextFrameIndex = currentFrameIndex + 1;
+    
+    if (frameQueueRef.current.length <= nextFrameIndex) {
+      setWaitingForFrame(true);
+      
+      if (rutubePlayerRef.current && isVideoPlayingRef.current) {
+        rutubePlayerRef.current.pause();
+      }
+      
+      playbackTimeoutRef.current = setTimeout(() => {
+        controlVideoPlayback();
+      }, 100);
+      return;
     }
 
+    const nextFrame = frameQueueRef.current[nextFrameIndex];
+    if (nextFrame) {
+      syncVideoToTime(nextFrame.timestamp);
+      
+      processFrameData(nextFrame);
+      currentFrameIndexRef.current = nextFrameIndex;
+      
+      setWaitingForFrame(false);
+      
+      if (rutubePlayerRef.current && !isVideoPlayingRef.current) {
+        rutubePlayerRef.current.play();
+      }
+      
+      const currentFrame = frameQueueRef.current[currentFrameIndex];
+      const frameInterval = nextFrame.timestamp - (currentFrame?.timestamp || 0);
+      const delay = Math.max(frameInterval * 1000, 100);
+      
+      playbackTimeoutRef.current = setTimeout(() => {
+        controlVideoPlayback();
+      }, delay);
+    }
+  }, [syncVideoToTime, processFrameData]);
+
+  const startSynchronizedPlayback = useCallback(() => {
+    if (frameQueueRef.current.length > 0 && !isPlaying && playerReady) {
+      console.log('Начинаем синхронизированное воспроизведение');
+      setIsPlaying(true);
+      
+      const firstFrame = frameQueueRef.current[0];
+      processFrameData(firstFrame);
+      currentFrameIndexRef.current = 0;
+      
+      syncVideoToTime(firstFrame.timestamp);
+      
+      setTimeout(() => {
+        controlVideoPlayback();
+      }, 500);
+    }
+  }, [isPlaying, playerReady, processFrameData, syncVideoToTime, controlVideoPlayback]);
+
+  useEffect(() => {
+    if (!videoUrl) return;
+
+    setStatusMessage("Загрузка видео...");
+    
+    setTimeout(() => {
+      initializeRutubePlayer();
+    }, 500);
+
     return () => {
-      if (syncInterval) {
-        clearInterval(syncInterval);
+      if (rutubePlayerRef.current) {
+        try {
+          rutubePlayerRef.current.stop();
+        } catch (error) {
+          console.warn('Ошибка остановки плеера:', error);
+        }
       }
     };
-  }, [playerReady, currentFrameTime]);
+  }, [videoUrl, initializeRutubePlayer]);
+
+  useEffect(() => {
+    if (frameDataStream) {
+      console.log('Получен новый кадр:', frameDataStream);
+      frameQueueRef.current.push(frameDataStream);
+      
+      if (playerReady && isVideoPlayingRef.current && !isPlaying) {
+        startSynchronizedPlayback();
+      }
+    }
+  }, [frameDataStream, playerReady, isPlaying, startSynchronizedPlayback]);
+
+  useEffect(() => {
+    drawAnnotations();
+  }, [drawAnnotations]);
+
+  useEffect(() => {
+    return () => {
+      if (playbackTimeoutRef.current) {
+        clearTimeout(playbackTimeoutRef.current);
+      }
+    };
+  }, []);
+
+  if (error) {
+    return (
+      <Box
+        maxW="900px"
+        width="100%"
+        mx="auto"
+        mt={8}
+        css={{
+          animation: `${fadeInUp} 0.6s ease-out`
+        }}
+      >
+        <Alert 
+          status="error" 
+          borderRadius="24px"
+          p={8}
+          bg="linear-gradient(135deg, #fee 0%, #fdd 100%)"
+          border="2px solid #f56565"
+          boxShadow="0 10px 40px rgba(245, 101, 101, 0.2)"
+        >
+          <AlertIcon color="#f56565" />
+          <Box>
+            <Text 
+              fontWeight="bold" 
+              fontSize="lg"
+              fontFamily="Montserrat, sans-serif"
+              color="#c53030"
+            >
+              Ошибка плеера 😞
+            </Text>
+            <Text 
+              fontFamily="Montserrat, sans-serif"
+              color="#744210"
+              mt={2}
+            >
+              {error}
+            </Text>
+          </Box>
+        </Alert>
+      </Box>
+    );
+  }
 
   return (
-    <Box position="relative" width="100%" maxW="840px" mx="auto" mt={4}>
-      {!playerReady && (
-        <Flex
-          position="absolute"
-          top="0"
-          left="0"
-          right="0"
-          bottom="0"
-          bg="black"
-          color="white"
-          align="center"
-          justify="center"
-          flexDirection="column"
-          zIndex="1"
-        >
-          <Spinner size="xl" mb={4} />
-          <Text>{statusMessage}</Text>
-        </Flex>
-      )}
-      
-      <Box 
-        ref={playerContainerRef}
+    <Box 
+      maxW="900px" 
+      width="100%" 
+      mx="auto" 
+      mt={8}
+      css={{
+        opacity: 0,
+        animation: `${fadeInUp} 0.8s ease-out 0.3s forwards`
+      }}
+    >
+      <Box
         position="relative"
-        width="840px"
-        height="473px"
-        display={playerReady ? "block" : "none"}
+        bg="white"
+        borderRadius="24px"
+        p={{ base: "20px", sm: "30px" }}
+        boxShadow="0 20px 60px rgba(0, 0, 0, 0.1)"
+        css={{
+          '&:hover': {
+            transform: 'translateY(-5px)',
+            boxShadow: '0 25px 70px rgba(0, 0, 0, 0.15)',
+            transition: 'all 0.3s ease'
+          }
+        }}
       >
-        <div id="rutube-player" style={{ width: '100%', height: '100%' }} />
-        
-        <canvas
-          ref={canvasRef}
-          style={{
-            position: "absolute",
-            top: 0,
-            left: 0,
-            width: "100%",
-            height: "100%",
-            pointerEvents: "none",
-            zIndex: 10
-          }}
-        />
-      </Box>
-      
-      {recognizedText && (
+        {!playerReady && (
+          <Flex
+            position="absolute"
+            top="0"
+            left="0"
+            right="0"
+            bottom="0"
+            bg="linear-gradient(135deg, #667eea 0%, #764ba2 100%)"
+            color="white"
+            align="center"
+            justify="center"
+            flexDirection="column"
+            zIndex="2"
+            borderRadius="24px"
+            css={{
+              animation: `${scaleIn} 0.5s ease-out`
+            }}
+          >
+            <Box
+              css={{
+                animation: `${pulse} 2s infinite`
+              }}
+            >
+              <Spinner 
+                size="xl" 
+                mb={6}
+                thickness="4px"
+                speed="0.8s"
+                color="white"
+              />
+            </Box>
+            <Text
+              fontFamily="Montserrat, sans-serif"
+              fontWeight="600"
+              fontSize="18px"
+              textAlign="center"
+              css={{
+                animation: `${fadeInUp} 0.6s ease-out 0.2s both`
+              }}
+            >
+              {statusMessage}
+            </Text>
+          </Flex>
+        )}
+
         <Box
-          position="absolute"
-          bottom="0"
-          left="0"
-          right="0"
-          bg="rgba(0,0,0,0.7)"
-          color="white"
-          p={2}
-          textAlign="center"
-          fontSize="lg"
-          zIndex="20"
+          position="relative"
+          borderRadius="20px"
+          overflow="hidden"
+          css={{
+            border: playerReady ? '3px solid #4B8BFC' : '3px solid #E2E8F0',
+            animation: playerReady ? `${glowBorder} 3s ease-in-out infinite` : 'none',
+            transition: 'all 0.3s ease'
+          }}
         >
-          <Text>{recognizedText}</Text>
+          <Box 
+            position="relative"
+            width="100%"
+            height="473px"
+            bg="#000"
+          >
+            <Box
+              id="rutube-player-container"
+              width="100%"
+              height="100%"
+              style={{
+                borderRadius: '17px',
+                overflow: 'hidden'
+              }}
+            />
+            
+            <canvas
+              ref={canvasRef}
+              style={{
+                position: "absolute",
+                top: 0,
+                left: 0,
+                width: "100%",
+                height: "100%",
+                pointerEvents: "none",
+                zIndex: 10,
+                borderRadius: '17px'
+              }}
+            />
+
+            {waitingForFrame && playerReady && (
+              <Box
+                position="absolute"
+                top="20px"
+                right="20px"
+                bg="rgba(255, 193, 7, 0.9)"
+                color="white"
+                p={2}
+                borderRadius="8px"
+                fontSize="sm"
+                fontWeight="600"
+                zIndex={15}
+                css={{
+                  animation: `${pulse} 1s infinite`
+                }}
+              >
+                ⏳ Ожидание кадра...
+              </Box>
+            )}
+
+            {currentFrameData && playerReady && (
+              <Box
+                position="absolute"
+                top="20px"
+                left="20px"
+                bg="rgba(75, 139, 252, 0.9)"
+                color="white"
+                p={2}
+                borderRadius="8px"
+                fontSize="sm"
+                fontWeight="600"
+                zIndex={15}
+              >
+                📹 Кадр: {currentFrameData.frame_number} | 🕐 {currentFrameData.timestamp.toFixed(2)}s
+              </Box>
+            )}
+          </Box>
         </Box>
-      )}
+
+        {playerReady && (
+          <Box 
+            mt={6} 
+            p={6} 
+            bg="linear-gradient(135deg, #f6f9fc 0%, #e9f4ff 100%)"
+            borderRadius="20px"
+            border="1px solid #E2E8F0"
+            css={{
+              animation: `${fadeInUp} 0.6s ease-out 0.5s both`
+            }}
+          >
+            <Flex direction="column" gap={4}>
+              <Flex 
+                direction={{ base: "column", md: "row" }}
+                align={{ base: "flex-start", md: "center" }}
+                justify="space-between"
+                gap={3}
+              >
+                <Text 
+                  fontSize="lg" 
+                  fontWeight="700"
+                  color="#023BA3"
+                  fontFamily="Montserrat, sans-serif"
+                  display="flex"
+                  alignItems="center"
+                  gap={2}
+                >
+                  🎬 Видео ID: {extractVideoId(videoUrl)}
+                </Text>
+                
+                <Text 
+                  fontSize="sm" 
+                  fontWeight="600"
+                  color="#667eea"
+                  fontFamily="Montserrat, sans-serif"
+                >
+                  📝 Найдено уникальных текстов: {allFoundTexts.length}
+                </Text>
+              </Flex>
+
+              {/* Секция с накопленным уникальным текстом */}
+              {allFoundTexts.length > 0 && (
+                <Box
+                  bg="white"
+                  borderRadius="12px"
+                  border="2px solid #667eea"
+                  p={4}
+                  maxHeight="200px"
+                  overflowY="auto"
+                  css={{
+                    '&::-webkit-scrollbar': {
+                      width: '6px',
+                    },
+                    '&::-webkit-scrollbar-track': {
+                      background: '#f1f1f1',
+                      borderRadius: '3px',
+                    },
+                    '&::-webkit-scrollbar-thumb': {
+                      background: '#667eea',
+                      borderRadius: '3px',
+                    },
+                    '&::-webkit-scrollbar-thumb:hover': {
+                      background: '#4B8BFC',
+                    },
+                  }}
+                >
+                  <Text 
+                    fontWeight="600" 
+                    color="#023BA3" 
+                    mb={3}
+                    fontSize="sm"
+                    display="flex"
+                    alignItems="center"
+                    gap={2}
+                  >
+                    📚 Весь найденный текст:
+                  </Text>
+                  
+                  <Flex direction="column" gap={2}>
+                    {allFoundTexts.map((text, index) => (
+                      <Box
+                        key={`unique-${index}`}
+                        p={2}
+                        bg="linear-gradient(135deg, #f8faff 0%, #e6f3ff 100%)"
+                        borderRadius="8px"
+                        border="1px solid #E2E8F0"
+                        css={{
+                          '&:hover': {
+                            transform: 'translateX(2px)',
+                            boxShadow: '0 2px 8px rgba(75, 139, 252, 0.15)',
+                            transition: 'all 0.2s ease'
+                          }
+                        }}
+                      >
+                        <Text
+                          fontFamily="Montserrat, sans-serif"
+                          fontWeight="500"
+                          fontSize="14px"
+                          color="#2D3748"
+                          wordBreak="break-word"
+                        >
+                          <Text as="span" fontWeight="600" color="#667eea">
+                            {index + 1}.
+                          </Text>{" "}
+                          {text}
+                        </Text>
+                      </Box>
+                    ))}
+                  </Flex>
+                </Box>
+              )}
+              
+              {recognizedTexts.length > 0 && (
+                <Box
+                  position="relative"
+                  bg="white"
+                  borderRadius="12px"
+                  border="2px solid #4B8BFC"
+                  p={4}
+                  minHeight="60px"
+                  overflow="hidden"
+                >
+                  <Text 
+                    fontWeight="600" 
+                    color="#023BA3" 
+                    mb={2}
+                    fontSize="sm"
+                  >
+                    📝 Распознанный текст в реальном времени:
+                  </Text>
+                  <Box
+                    position="relative"
+                    width="100%"
+                    height="30px"
+                    overflow="hidden"
+                  >
+                    {recognizedTexts.slice(-3).map((text, index) => (
+                      <Text
+                        key={`${text}-${index}-${Date.now()}`}
+                        position="absolute"
+                        top={`${index * 10}px`}
+                        left="0"
+                        right="0"
+                        fontFamily="Montserrat, sans-serif"
+                        fontWeight="500"
+                        fontSize="14px"
+                        color="#2D3748"
+                        whiteSpace="nowrap"
+                        css={{
+                          animation: `${textFlow} 8s linear infinite`,
+                          animationDelay: `${index * 0.5}s`
+                        }}
+                      >
+                        {text}
+                      </Text>
+                    ))}
+                  </Box>
+                </Box>
+              )}
+
+              {/* Статистика */}
+              <Flex
+                gap={3}
+                fontSize="sm"
+                color="#4A5568"
+                fontFamily="Montserrat, sans-serif"
+                justifyContent="space-between"
+              >
+                <Box
+                  p={3}
+                  bg="white"
+                  borderRadius="12px"
+                  border="1px solid #E2E8F0"
+                  textAlign="center"
+                >
+                  <Text fontWeight="600" color="#023BA3" mb={1}>📊 Статус:</Text>
+                  <Text fontSize="xs">
+                    {isPlaying ? '▶️ Синхронизация' : '⏸️ Ожидание'}
+                  </Text>
+                </Box>
+                
+                <Box
+                  p={3}
+                  bg="white"
+                  borderRadius="12px"
+                  border="1px solid #E2E8F0"
+                  textAlign="center"
+                >
+                  <Text fontWeight="600" color="#023BA3" mb={1}>🎯 Объекты:</Text>
+                  <Text fontSize="xs">{currentAnnotations.length}</Text>
+                </Box>
+                
+                <Box
+                  p={3}
+                  bg="white"
+                  borderRadius="12px"
+                  border="1px solid #E2E8F0"
+                  textAlign="center"
+                >
+                  <Text fontWeight="600" color="#023BA3" mb={1}>⏱️ Кадры:</Text>
+                  <Text fontSize="xs">{frameQueueRef.current.length}</Text>
+                </Box>
+
+                <Box
+                  p={3}
+                  bg="white"
+                  borderRadius="12px"
+                  border="1px solid #E2E8F0"
+                  textAlign="center"
+                >
+                  <Text fontWeight="600" color="#023BA3" mb={1}>📚 Тексты:</Text>
+                  <Text fontSize="xs">{allFoundTexts.length}</Text>
+                </Box>
+              </Flex>
+            </Flex>
+          </Box>
+        )}
+      </Box>
     </Box>
   );
 };
