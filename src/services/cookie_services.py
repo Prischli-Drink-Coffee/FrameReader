@@ -1,9 +1,7 @@
 from typing import Dict, Any
 from datetime import datetime, timedelta
 import hashlib
-
 from fastapi import Request, HTTPException, status, Response
-
 from src.jwt_cookie.session_manager import JWTCookieManager, FingerprintCollector
 from src.services import user_services, user_sessions_services
 

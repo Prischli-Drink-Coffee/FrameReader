@@ -6,11 +6,11 @@ import hashlib
 from copy import deepcopy
 from fastapi.testclient import TestClient
 from src.pipeline.server import app
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 from decimal import Decimal
 import json
 
-log = setup_logging()
+log = get_logger(__name__)
 client = TestClient(app)
 
 

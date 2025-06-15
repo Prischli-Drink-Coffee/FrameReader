@@ -9,11 +9,11 @@ import httpx
 import numpy as np
 from PIL import Image
 
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 from src.utils.env import Env
 
 env = Env()
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class StreamEndpointClient:
@@ -367,8 +367,7 @@ class StreamEndpointClient:
 
 
 async def example_usage():
-
-    from stream_endpoint import StreamEndpointClient
+    
     import numpy as np
     
     test_array_1 = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)

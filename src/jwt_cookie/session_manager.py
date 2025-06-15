@@ -5,10 +5,10 @@ import jwt
 import hashlib
 from dataclasses import dataclass
 from src.jwt_cookie.settings import Settings
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 @dataclass(frozen=True)

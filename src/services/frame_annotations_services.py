@@ -4,9 +4,9 @@ from src.repository import user_repository
 from src.database.models import Users
 from fastapi import HTTPException, status
 from src.utils.exam_services import check_for_duplicates, check_if_exists
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 def get_all_users() -> List[Users]:

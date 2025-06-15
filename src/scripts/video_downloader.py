@@ -8,10 +8,10 @@ from typing import Tuple, Optional
 import json
 import signal
 
-from src.utils.custom_logging import setup_logging
-from src.utils.cancellation_handler import CancellationHandler
+from src.utils.custom_logging import get_logger
+from src.scripts.cancel_handler import CancellationHandler
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class VideoDownloader:

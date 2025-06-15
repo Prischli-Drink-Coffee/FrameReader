@@ -1,8 +1,8 @@
 from typing import Callable, List, Any
 from fastapi import HTTPException, status
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 def check_for_duplicates(

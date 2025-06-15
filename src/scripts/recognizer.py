@@ -13,9 +13,9 @@ from src.triton_api.websocket_endpoint import WebSocketEndpointClient
 from src.scripts.tracker import VideoStreamTracker, FrameTrackingResult
 from src.scripts.cancel_handler import CancellationHandler
 
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class DonutInferenceClient:
@@ -108,13 +108,14 @@ class DonutTextRecognizer:
                     log.warning(f"Empty crop for track {tid}: box={x1, y1, x2, y2}")
                     continue
                 self._buffers[tid].append(crop)
-                log.debug(f"Appended crop for tid={tid}, buffer now {len(self._buffers[tid])}")
+                # log.debug(f"Appended crop for tid={tid}, buffer now {len(self._buffers[tid])}")
                 if len(self._buffers[tid]) >= self._history_length:
+                    log.info(f"Track {tid} buffer full, scheduling inference")
                     mid = self._history_length // 2
                     mid_frame = self._buffers[tid][mid]
-                    log.debug(
-                        f"Scheduling Donut inference for track {tid}, buffer size={len(self._buffers[tid])}, mid_frame shape={mid_frame.shape}"
-                    )
+                    # log.debug(
+                    #     f"Scheduling Donut inference for track {tid}, buffer size={len(self._buffers[tid])}, mid_frame shape={mid_frame.shape}"
+                    # )
                     text = await self._client.infer(mid_frame)
                     self._results[tid] = text
                     obj["recognized_text"] = text
@@ -137,11 +138,11 @@ async def recognize_text_from_video(
     tracker_detection_source: str = "main",
     triton_stream_url: Optional[str] = None,
     triton_ws_url: Optional[str] = None,
-    triton_batch_url: Optional[str] = None,
+    triton_batch_url: Optional[str] = 'http://localhost:8000',
     triton_model_name: str = "yolo",
     triton_chunk_size: int = 1,
     donut_detection_source: str = "main",
-    donut_triton_main_url: Optional[str] = None,
+    donut_triton_main_url: Optional[str] = 'http://localhost:8000',
     donut_triton_stream_url: Optional[str] = None,
     donut_triton_ws_url: Optional[str] = None,
     donut_model_name: str = "donut",
@@ -234,4 +235,14 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    import logging
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s-%(msecs)03d %(levelname)-8s %(name)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    logging.getLogger().setLevel(logging.DEBUG)
+    # logging.getLogger("httpx").setLevel(logging.DEBUG)
+    # logging.getLogger("aiohttp").setLevel(logging.DEBUG)
+    # logging.getLogger("urllib3").setLevel(logging.DEBUG)
     asyncio.run(main())

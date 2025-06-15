@@ -3,10 +3,9 @@ import signal
 import sys
 from typing import Optional
 import threading
+from src.utils.custom_logging import get_logger
 
-from src.utils.custom_logging import setup_logging
-
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class CancellationHandler:

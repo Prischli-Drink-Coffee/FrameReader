@@ -17,11 +17,11 @@ except ImportError:
 
 from PIL import Image
 
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 from src.utils.env import Env
 
 env = Env()
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class WebSocketEndpointClient:
@@ -419,11 +419,13 @@ class WebSocketEndpointClient:
 
 async def example_usage():
     import numpy as np
+
     rgb_array = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
     test_arrays = [rgb_array, rgb_array] 
     if not env.TRITON_WS_URL:
         print("TRITON_WS_URL is not set. Skipping example.")
-        return
+        env.TRITON_WS_URL = "ws://localhost:8000"  # Default URL for local testing
+
     print(f"Attempting to connect to WebSocket server at: {env.TRITON_WS_URL}")
     try:
         async with WebSocketEndpointClient() as client: # __aenter__

@@ -9,11 +9,11 @@ import numpy as np
 from PIL import Image
 import asyncio
 
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 from src.utils.env import Env
 
 env = Env()
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class MainEndpointClient:
@@ -285,7 +285,6 @@ class MainEndpointClient:
 
 async def example_usage():
 
-    from main_endpoint import MainEndpointClient
     import numpy as np
     from pathlib import Path
     

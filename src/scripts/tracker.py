@@ -18,11 +18,11 @@ import asyncio
 from src.triton_api.main_endpoint import MainEndpointClient 
 from src.triton_api.stream_endpoint import StreamEndpointClient
 from src.triton_api.websocket_endpoint import WebSocketEndpointClient
+from src.scripts.cancel_handler import CancellationHandler
 
+from src.utils.custom_logging import get_logger
 
-from src.utils.custom_logging import setup_logging
-
-log = setup_logging()
+log = get_logger(__name__)
 
 _colors_list = [
     (0, 255, 0), (0, 0, 255), (255, 0, 0), (255, 255, 0),
@@ -124,7 +124,7 @@ class SAHITrackingWrapper:
         self.device = device if device else torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.triton_max_batch_size = triton_max_batch_size
         
-        log.debug(f"Using device: {self.device}, max_batch_size: {triton_max_batch_size}")
+        # log.debug(f"Using device: {self.device}, max_batch_size: {triton_max_batch_size}")
 
         self.model_names: Dict[int, str] = {}
         self.model_names_reverse_map: Dict[str, int] = {}
@@ -163,7 +163,7 @@ class SAHITrackingWrapper:
         if self.detection_source == "local":
             if not model_path or not os.path.exists(model_path):
                 raise FileNotFoundError(f"Model file not found: {model_path}")
-            log.debug(f"Loading local model from {model_path}")
+            # log.debug(f"Loading local model from {model_path}")
             self.model = YOLO(model_path, task='detect')
             self.model_names = self.model.names
             
@@ -174,19 +174,19 @@ class SAHITrackingWrapper:
                 base_url=triton_stream_url, 
                 chunk_size=triton_chunk_size
             )
-            log.debug(f"Triton Stream client: {triton_stream_url}")
+            # log.debug(f"Triton Stream client: {triton_stream_url}")
             
         elif self.detection_source == "ws":
             if not triton_ws_url:
                 raise ValueError("Triton WebSocket URL required for ws source")
             self.triton_ws_client = WebSocketEndpointClient(base_url=triton_ws_url)
-            log.debug(f"Triton WebSocket client: {triton_ws_url}")
+            # log.debug(f"Triton WebSocket client: {triton_ws_url}")
             
         elif self.detection_source == "main":
             if not triton_batch_url:
                 raise ValueError("Triton batch URL required for main source")
             self.triton_batch_client = MainEndpointClient(base_url=triton_batch_url)
-            log.debug(f"Triton Batch client: {triton_batch_url}")
+            # log.debug(f"Triton Batch client: {triton_batch_url}")
             
         else:
             raise ValueError(f"Unsupported detection_source: {self.detection_source}")
@@ -280,35 +280,63 @@ class SAHITrackingWrapper:
         batch_images: List[np.ndarray]
     ) -> List[Dict[str, Any]]:
         
-        if self.detection_source == "triton_stream" and self.triton_stream_client:
-            async with self.triton_stream_client as client:
-                result = await client.stream_collect_from_arrays(
-                    image_arrays=batch_images,
-                    model_name=self.triton_model_name
-                )
-                return result.get('results', [])
-                
-        elif self.detection_source == "triton_ws" and self.triton_ws_client:
-            return await self.triton_ws_client.run_inference_session(
-                model_name=self.triton_model_name,
-                images=batch_images
-            )
-            
-        elif self.detection_source == "triton_batch" and self.triton_batch_client:
-            async with self.triton_batch_client as client:
-                if self.triton_model_name == "yolo":
-                    result = await client.yolo_inference_from_arrays(
-                        image_arrays=batch_images,
-                        filenames=[f"window_{i}.jpg" for i in range(len(batch_images))]
-                    )
-                else:
-                    result = await client.donut_inference_from_arrays(
-                        image_arrays=batch_images,
-                        filenames=[f"window_{i}.jpg" for i in range(len(batch_images))]
-                    )
-                return result.get('results', [])
+        # log.debug(f"Processing Triton batch with {len(batch_images)} images, source: {self.detection_source}")
         
-        return []
+        try:
+            if self.detection_source == "main" and self.triton_batch_client:
+                # log.debug(f"Using Triton batch client with model: {self.triton_model_name}")
+                
+                async with self.triton_batch_client as client:
+                    if self.triton_model_name == "yolo":
+                        # log.debug("Calling yolo_inference_from_arrays")
+                        result = await client.yolo_inference_from_arrays(
+                            image_arrays=batch_images,
+                            filenames=[f"window_{i}.jpg" for i in range(len(batch_images))]
+                        )
+                        # log.debug(f"YOLO inference result keys: {result.keys() if result else 'None'}")
+                        # log.debug(f"YOLO inference result: {result}")
+                    else:
+                        # log.debug("Calling donut_inference_from_arrays")
+                        result = await client.donut_inference_from_arrays(
+                            image_arrays=batch_images,
+                            filenames=[f"window_{i}.jpg" for i in range(len(batch_images))]
+                        )
+                        # log.debug(f"Donut inference result: {result}")
+                    
+                    results_data = result.get('results', [])
+                    # log.debug(f"Extracted results: {len(results_data)} items")
+                    if results_data:
+                        # log.debug(f"First result sample: {results_data[0]}")
+                        pass
+                    return results_data
+                    
+            elif self.detection_source == "stream" and self.triton_stream_client:
+                # log.debug("Using Triton stream client")
+                async with self.triton_stream_client as client:
+                    result = await client.stream_collect_from_arrays(
+                        image_arrays=batch_images,
+                        model_name=self.triton_model_name
+                    )
+                    # log.debug(f"Stream result: {result}")
+                    return result.get('results', [])
+                    
+            elif self.detection_source == "ws" and self.triton_ws_client:
+                # log.debug("Using Triton WebSocket client")
+                result = await self.triton_ws_client.run_inference_session(
+                    model_name=self.triton_model_name,
+                    images=batch_images
+                )
+                # log.debug(f"WebSocket result: {result}")
+                return result
+                
+            else:
+                log.error(f"No valid Triton client for source: {self.detection_source}")
+                return []
+                
+        except Exception as e:
+            log.error(f"Triton batch processing error: {type(e).__name__}: {str(e)}")
+            log.error(f"Full traceback:\n{traceback.format_exc()}")
+            return []
 
     async def _process_chunked_batch(
         self, 
@@ -330,15 +358,26 @@ class SAHITrackingWrapper:
         triton_results: List[Dict[str, Any]],
         window_coords_list: List[Tuple[int, int, int, int]]
     ) -> List[Dict[str, torch.Tensor]]:
+        
+        # log.debug(f"Adapting detection format: {len(triton_results)} results, {len(window_coords_list)} windows")
+        
         adapted_results: List[Dict[str, torch.Tensor]] = []
         for i, result_data in enumerate(triton_results):
             if i >= len(window_coords_list):
+                log.warning(f"More results ({len(triton_results)}) than windows ({len(window_coords_list)})")
                 break
+                
+            # log.debug(f"Processing result {i}: {result_data}")
+            
             detections = result_data.get('detections')
             if detections is None:
+                # log.debug("No 'detections' key, trying legacy format")
                 boxes = result_data.get('boxes', [])
                 confidences = result_data.get('confidences', [])
                 classes = result_data.get('classes', [])
+                
+                # log.debug(f"Legacy format - boxes: {len(boxes)}, confidences: {len(confidences)}, classes: {len(classes)}")
+                
                 detections = []
                 for box, score, cls in zip(boxes, confidences, classes):
                     label = self.model_names.get(int(cls), str(cls))
@@ -347,12 +386,21 @@ class SAHITrackingWrapper:
                         'score': score,
                         'label': label
                     })
+                    
+            # log.debug(f"Final detections for window {i}: {len(detections)} objects")
+            if detections:
+                # log.debug(f"Sample detection: {detections[0]}")
+                pass
+                
             win_x1, win_y1, win_x2, win_y2 = window_coords_list[i]
             win_w, win_h = win_x2 - win_x1, win_y2 - win_y1
             adapted = self._adapt_triton_detections_to_torch(detections, win_w, win_h)
             adapted_results.append(adapted)
+            
         while len(adapted_results) < len(window_coords_list):
             adapted_results.append(self._adapt_triton_detections_to_torch([], 0, 0))
+            
+        # log.debug(f"Adapted results: {len(adapted_results)} windows processed")
         return adapted_results
 
     def _adapt_triton_detections_to_torch(
@@ -431,8 +479,8 @@ class SAHITrackingWrapper:
         return all_detections
 
     async def process_frame(self, frame: np.ndarray) -> List[Dict[str, Any]]:
-
         frame_height, frame_width = frame.shape[:2]
+        # log.debug(f"Processing frame: {frame_width}x{frame_height}")
         
         if isinstance(self.img_size, int):
             target_size_w = target_size_h = self.img_size
@@ -443,13 +491,17 @@ class SAHITrackingWrapper:
             frame, target_size_w, target_size_h
         )
         
+        # log.debug(f"Prepared {len(batch_images)} windows for processing")
+        
         if not batch_images:
+            log.warning("No windows prepared for processing")
             return []
 
         per_window_outputs: List[Dict[str, torch.Tensor]] = []
 
         try:
             if self.detection_source == "local":
+                # log.debug("Using local YOLO model")
                 results = self.model.predict(
                     source=batch_images,
                     conf=self.conf_threshold,
@@ -461,6 +513,8 @@ class SAHITrackingWrapper:
                     augment=False
                 )
                 
+                # log.debug(f"Local model returned {len(results)} results")
+                
                 for res_obj in results:
                     per_window_outputs.append({
                         'xyxy': res_obj.boxes.xyxy.to(self.device),
@@ -469,12 +523,15 @@ class SAHITrackingWrapper:
                     })
                     
             else:
+                # log.debug(f"Using Triton inference with source: {self.detection_source}")
                 if len(batch_images) <= self.triton_max_batch_size:
                     triton_results = await self._process_triton_batch(batch_images)
                 else:
                     triton_results = await self._process_chunked_batch(
                         batch_images, self.triton_max_batch_size
                     )
+                
+                # log.debug(f"Triton returned {len(triton_results)} results")
                 
                 per_window_outputs = self._adapt_detection_format(
                     triton_results, window_coords_list
@@ -484,23 +541,34 @@ class SAHITrackingWrapper:
                 per_window_outputs, window_coords_list,
                 target_size_w, target_size_h, frame_width, frame_height
             )
+            
+            # log.debug(f"Scaled detections: {len(all_detections)} total objects")
 
         except Exception as e:
-            log.error(f"Detection processing error ({self.detection_source}): {e}")
+            log.error(f"Detection processing error ({self.detection_source}): {type(e).__name__}: {str(e)}")
+            log.error(f"Full traceback:\n{traceback.format_exc()}")
             return []
 
         merged_detections_np = self._nms_global(all_detections)
+        # log.debug(f"After NMS: {merged_detections_np.shape[0]} objects")
+        
         mock_results = MockResults(merged_detections_np, (frame_height, frame_width))
         mock_results.names = self.model_names
 
         try:
             tracked_output_np = self.tracker.update(mock_results, frame)
-        except Exception:
+            # log.debug(f"Tracker output: {tracked_output_np.shape if isinstance(tracked_output_np, np.ndarray) else 'Empty'}")
+        except Exception as e:
+            # log.error(f"Tracker update error: {type(e).__name__}: {str(e)}")
+            # log.error(f"Tracker traceback:\n{traceback.format_exc()}")
             return []
 
-        return self._format_tracking_results(
+        final_results = self._format_tracking_results(
             tracked_output_np, frame_width, frame_height
         )
+        
+        # log.debug(f"Final tracking results: {len(final_results)} objects")
+        return final_results
 
     def _format_tracking_results(
         self, 
@@ -704,6 +772,7 @@ class VideoStreamTracker:
         triton_chunk_size: int = 1,
         class_names_map: Optional[Dict[int, str]] = None
     ):
+        self.cancellation_handler = CancellationHandler()
         self.model_path = model_path
         self.tracker_type = tracker_type
         self.tracker_config_path = tracker_config_path
@@ -793,6 +862,7 @@ class VideoStreamTracker:
 
             frame_num = 0
             while cap.isOpened():
+                self.cancellation_handler.check_cancellation()
                 success, frame = cap.read()
                 if not success or frame is None:
                     log.info("End of video stream or failed to read frame.")
@@ -855,6 +925,7 @@ class VideoStreamTracker:
             overall_start_time = time.time()
 
             while cap.isOpened():
+                self.cancellation_handler.check_cancellation()
                 success, frame = cap.read()
                 if not success or frame is None:
                     log.info("Camera stream ended or failed to read frame.")
@@ -923,6 +994,9 @@ async def track_video_sahi(
     triton_chunk_size: int = 1,
     class_names_map: Optional[Dict[int, str]] = None
 ) -> Optional[str]:
+    cancellation_handler = CancellationHandler()
+    cancellation_handler.setup_signal_handlers()
+    
     output_dir = os.path.dirname(output_path)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir, exist_ok=True)
@@ -978,6 +1052,8 @@ async def track_video_sahi(
             include_annotated_frame=True, show_labels=show_labels,
             line_width=line_width, fallback_frame_rate=fallback_frame_rate
         ):
+            cancellation_handler.check_cancellation()
+            
             if result.annotated_frame is not None:
                 out_writer.write(result.annotated_frame)
             else:
@@ -1007,9 +1083,13 @@ async def track_video_sahi(
                          f"Processed (strided): {processed_frames_count} | "
                          f"FPS: {current_fps_proc:.2f} | ETA: {eta_str}")
 
+    except asyncio.CancelledError:
+        log.info("Video processing was cancelled gracefully")
+        return None
     except Exception as e_main:
         log.error(f"An error occurred during ASYNC video processing: {type(e_main).__name__}: {str(e_main)}")
         log.error(f"Full traceback:\n{traceback.format_exc()}")
+        return None
     finally:
         out_writer.release()
         if show_preview:
@@ -1023,6 +1103,7 @@ async def track_video_sahi(
                   f"Total processing time: {total_processing_time:.2f} seconds\n" +
                   f"Average processing FPS: {avg_processing_fps:.2f}\n" +
                   f"Output video saved to: {output_path}\n" + "-" * 40)
+    
     return output_path
 
 
@@ -1134,8 +1215,14 @@ async def main():
 
 
 if __name__ == "__main__":
-
     import logging
-    logging.basicConfig(level=logging.INFO)
-    
+    logging.basicConfig(
+        level=logging.DEBUG,
+        format='%(asctime)s-%(msecs)03d %(levelname)-8s %(name)s: %(message)s',
+        datefmt='%H:%M:%S'
+    )
+    logging.getLogger().setLevel(logging.DEBUG)
+    # logging.getLogger("httpx").setLevel(logging.DEBUG)
+    # logging.getLogger("aiohttp").setLevel(logging.DEBUG)
+    # logging.getLogger("urllib3").setLevel(logging.DEBUG)
     asyncio.run(main())

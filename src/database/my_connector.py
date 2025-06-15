@@ -1,10 +1,10 @@
 import pymysql
 from pymysql.err import OperationalError
 from src.utils.env import Env
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
 env = Env()
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class Database:

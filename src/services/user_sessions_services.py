@@ -6,9 +6,9 @@ from fastapi import HTTPException, status
 from src.repository import user_sessions_repository
 from src.database.models import UserSessions
 from src.utils.exam_services import check_if_exists
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class SessionNotFoundError(HTTPException):

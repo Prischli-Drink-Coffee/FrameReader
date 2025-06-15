@@ -4,9 +4,9 @@ from src.repository import video_sessions_repository
 from src.database.models import VideoSessions, ProcessingStatusEnum
 from fastapi import HTTPException, status
 import json
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 
-log = setup_logging()
+log = get_logger(__name__)
 
 
 def get_all_video_sessions() -> List[VideoSessions]:

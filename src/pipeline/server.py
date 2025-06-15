@@ -7,7 +7,7 @@ from enum import Enum
 from fastapi.openapi.models import Tag as OpenApiTag
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
-from src.utils.custom_logging import setup_logging
+from src.utils.custom_logging import get_logger
 from src.utils.env import Env
 from src import path_to_project
 from datetime import datetime, timedelta
@@ -33,13 +33,13 @@ from src.services import (
     user_sessions_services,
     video_sessions_services
 )
-from src.utils.cancellation_handler import CancellationHandler
+from src.scripts.cancel_handler import CancellationHandler
 from src.scripts.video_downloader import VideoDownloader
-from src.scripts.tracker import VideoStreamTracker
+from src.scripts.tracker import VideoStreamTracker, FrameTrackingResult
 from src.scripts.recognizer import recognize_text_from_video
 
 env = Env()
-log = setup_logging()
+log = get_logger(__name__)
 
 
 class VideoProcessingManager:
@@ -213,6 +213,10 @@ class VideoProcessor:
         self.ws_manager = websocket_manager
         self.temp_video_path: Optional[str] = None
         self.cancellation = CancellationHandler()
+        self._frame_counter = 0
+        self._objects_detected = 0
+        self._frames_processed = 0
+        self._frames_with_objects = 0
         
     async def process_video_request(self, init_msg: Dict[str, Any]) -> None:
         video_url = init_msg.get("video_url")
@@ -220,6 +224,9 @@ class VideoProcessor:
         
         if not video_url:
             raise VideoProcessingError("Missing video_url in init message.")
+        
+        log.info(f"Processing video request for session {self.session_id}: {video_url}")
+        log.info(f"Parameters: {params}")
         
         VideoProcessingManager.add_session(self.session_id)
         
@@ -231,6 +238,7 @@ class VideoProcessor:
             log.info(f"Video processing cancelled for session {self.session_id}")
             raise VideoProcessingError("Processing was cancelled", should_close_ws=False)
         except Exception as e:
+            log.error(f"Processing failed for session {self.session_id}: {e}", exc_info=True)
             if isinstance(e, VideoProcessingError):
                 raise
             raise VideoProcessingError(f"Processing failed: {str(e)}")
@@ -246,7 +254,6 @@ class VideoProcessor:
         }):
             raise VideoProcessingError("WebSocket connection lost during download start")
         
-        # Run download in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
         try:
             downloader = VideoDownloader(max_duration=params.get("max_duration", 10))
@@ -260,6 +267,8 @@ class VideoProcessor:
         if self.temp_video_path is None:
             raise VideoProcessingError("Failed to download video.")
         
+        log.info(f"Video downloaded to: {self.temp_video_path}")
+        
         if not await self.ws_manager.send_json({
             "status": "info", 
             "message": "Video downloaded. Starting processing..."
@@ -270,40 +279,76 @@ class VideoProcessor:
         recognition_args = self._build_recognition_args(params)
         buffered_results: List[Any] = []
         
+        log.info(f"Starting recognition with args: {recognition_args}")
+        
         try:
+            frame_count = 0
             async for result in recognize_text_from_video(**recognition_args):
                 self.cancellation.check_cancellation()
                 
                 if not self.ws_manager.is_open:
                     raise VideoProcessingError("WebSocket connection closed during processing")
                 
+                frame_count += 1
+                self._frames_processed = frame_count
+                
+                objects_in_frame = len(result.tracked_objects) if result.tracked_objects else 0
+                
+                if objects_in_frame > 0:
+                    self._frames_with_objects += 1
+                    # log.info(f"Frame {result.frame_number}: {objects_in_frame} objects detected")
+                    for i, obj in enumerate(result.tracked_objects):
+                        # log.debug(f"  Object {i}: track_id={obj.get('track_id')}, "
+                        #         f"box={obj.get('box')}, confidence={obj.get('confidence')}, "
+                        #         f"text='{obj.get('recognized_text', '')}'")
+                        pass
+                else:
+                    # log.debug(f"Frame {result.frame_number}: no objects detected")
+                    pass
+                
                 result_dict = self._build_result_dict(result)
                 
                 if not await self.ws_manager.send_json(result_dict):
-                    raise VideoProcessingError("Failed to send frame data")
+                    # raise VideoProcessingError("Failed to send frame data")
+                    log.warning(f"WebSocket connection lost while sending frame {result.frame_number}")
                 
                 buffered_results.append(result)
                 
+                if frame_count % 50 == 0:
+                    log.info(f"Progress: {frame_count} frames processed, "
+                           f"{self._frames_with_objects} with objects")
+                
         except Exception as e:
+            log.error(f"Recognition failed: {e}", exc_info=True)
             if "Connect call failed" in str(e) or "Connection refused" in str(e):
                 raise VideoProcessingError(
                     f"Cannot connect to Triton server: {str(e)}. Please ensure Triton is running."
                 )
             raise VideoProcessingError(f"Video recognition failed: {str(e)}")
         
+        log.info(f"Recognition completed: {self._frames_processed} frames, "
+               f"{self._frames_with_objects} with objects, "
+               f"total objects: {self._objects_detected}")
+        
         await self._save_buffered_results(buffered_results)
     
     async def _finalize_processing(self) -> None:
         video_sessions_services.update_session_status(self.session_id, "completed")
         
-        if not await self.ws_manager.send_json({
+        completion_message = {
             "status": "info", 
-            "message": "Video processing completed."
-        }):
+            "message": f"Video processing completed. Processed {self._frames_processed} frames "
+                      f"with {self._objects_detected} objects detected.",
+            "frames_processed": self._frames_processed,
+            "frames_with_objects": self._frames_with_objects,
+            "total_objects": self._objects_detected
+        }
+        
+        if not await self.ws_manager.send_json(completion_message):
             log.warning(f"Could not send completion message for session {self.session_id}")
     
     def _build_recognition_args(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        return {
+        args = {
             "video_path": self.temp_video_path,
             "model_path": params.get("model_path", None),
             "tracker_type": params.get("tracker_type", "botsort"),
@@ -327,21 +372,78 @@ class VideoProcessor:
             "donut_triton_stream_url": params.get("donut_triton_stream_url", TRITON_HTTP_URL),
             "donut_triton_ws_url": params.get("donut_triton_ws_url", TRITON_WS_URL),
             "donut_model_name": params.get("donut_model_name", "donut"),
-            "history_length": params.get("history_length", 8),
+            "history_length": params.get("history_length", 24),
             "include_annotated_frame": params.get("include_annotated_frame", False),
-            "show_labels": params.get("show_labels", False),
-            **params.get("tracker_extra", {})
+            "show_labels": params.get("show_labels", False)
         }
+        
+        log.info(f"Recognition args validation:")
+        log.info(f"  video_path: {args['video_path']} (exists: {Path(args['video_path']).exists() if args['video_path'] else False})")
+        log.info(f"  conf threshold: {args['conf']}")
+        log.info(f"  classes: {args['classes']}")
+        log.info(f"  triton_urls: {args['triton_stream_url']}")
+        
+        return args
     
-    def _build_result_dict(self, result: Any) -> Dict[str, Any]:
-        result_dict = {
-            "frame_number": getattr(result, "frame_number", 0),
-            "tracked_objects": getattr(result, "tracked_objects", []),
-            "timestamp": getattr(result, 'timestamp', None),
-        }
-        if hasattr(result, 'annotated_frame') and result.annotated_frame is not None:
-            result_dict["has_frame"] = True
-        return result_dict
+    def _build_result_dict(self, result: FrameTrackingResult) -> Dict[str, Any]:
+        try:
+            tracked_objects = []
+            
+            if not result.tracked_objects:
+                # log.debug(f"Frame {result.frame_number}: result.tracked_objects is empty or None")
+                pass
+            
+            for obj in result.tracked_objects or []:
+                if not obj or not isinstance(obj, dict):
+                    log.warning(f"Invalid object format: {obj}")
+                    continue
+                    
+                if "track_id" not in obj or "box" not in obj:
+                    log.warning(f"Missing required fields in object: {obj}")
+                    continue
+                
+                box = obj["box"]
+                if not isinstance(box, (list, tuple)) or len(box) != 4:
+                    log.warning(f"Invalid box format: {box}")
+                    continue
+                
+                x1, y1, x2, y2 = box
+                if not all(isinstance(coord, (int, float)) for coord in [x1, y1, x2, y2]):
+                    log.warning(f"Invalid box coordinates: {box}")
+                    continue
+                
+                tracked_obj = {
+                    "track_id": obj["track_id"],
+                    "box": [float(x1), float(y1), float(x2), float(y2)],
+                    "confidence": float(obj.get("confidence", 0.0)),
+                    "class_id": obj.get("class_id", 0),
+                    "recognized_text": obj.get("recognized_text", "")
+                }
+                
+                tracked_objects.append(tracked_obj)
+            
+            if tracked_objects:
+                self._objects_detected += len(tracked_objects)
+            
+            result_dict = {
+                "frame_number": result.frame_number,
+                "timestamp": float(result.timestamp),
+                "tracked_objects": tracked_objects,
+                "detection_count": len(tracked_objects),
+                "processing_time": getattr(result, 'processing_time', 0.0)
+            }
+            
+            return result_dict
+            
+        except Exception as e:
+            log.error(f"Error building result dict for frame {result.frame_number}: {e}")
+            return {
+                "frame_number": getattr(result, 'frame_number', self._frame_counter),
+                "timestamp": float(getattr(result, 'timestamp', 0.0)),
+                "tracked_objects": [],
+                "detection_count": 0,
+                "error": str(e)
+            }
     
     async def _save_buffered_results(self, buffered_results: List[Any]) -> None:
         for frame_data in buffered_results:
