@@ -51,23 +51,6 @@ const glowBorder = keyframes`
   }
 `;
 
-const textFlow = keyframes`
-  0% {
-    transform: translateX(100%);
-    opacity: 0;
-  }
-  10% {
-    opacity: 1;
-  }
-  90% {
-    opacity: 1;
-  }
-  100% {
-    transform: translateX(-100%);
-    opacity: 0;
-  }
-`;
-
 const VideoPlayerWithAnnotations = ({ 
   videoUrl, 
   videoSessionId, 
@@ -81,18 +64,17 @@ const VideoPlayerWithAnnotations = ({
   const playerContainerRef = useRef(null);
   const rutubePlayerRef = useRef(null);
   const frameQueueRef = useRef([]);
-  const currentFrameIndexRef = useRef(0);
-  const playbackTimeoutRef = useRef(null);
-  const isVideoPlayingRef = useRef(false);
+  const currentFrameIndexRef = useRef(-1);
+  const isVideoInitializedRef = useRef(false);
+  const isProcessingNewFrameRef = useRef(false);
   
   const [statusMessage, setStatusMessage] = useState("Инициализация плеера...");
   const [currentAnnotations, setCurrentAnnotations] = useState([]);
   const [recognizedTexts, setRecognizedTexts] = useState([]);
   const [playerReady, setPlayerReady] = useState(false);
   const [error, setError] = useState(null);
-  const [isPlaying, setIsPlaying] = useState(false);
   const [currentFrameData, setCurrentFrameData] = useState(null);
-  const [waitingForFrame, setWaitingForFrame] = useState(false);
+  const [waitingForNextFrame, setWaitingForNextFrame] = useState(false);
   const [uniqueTexts, setUniqueTexts] = useState(new Set());
   const [allFoundTexts, setAllFoundTexts] = useState([]);
 
@@ -134,7 +116,7 @@ const VideoPlayerWithAnnotations = ({
           id: PREFFIX_PLAYER_ID + this.selector,
           width: this.config.width || 720,
           height: this.config.height || 405,
-          src: EMBEDED_API_URI + this.config.videoId + '?autoplay=1',
+          src: EMBEDED_API_URI + this.config.videoId + '?autoplay=0',
           frameBorder: 0,
           allow: 'autoplay',
           allowFullScreen: '',
@@ -255,7 +237,7 @@ const VideoPlayerWithAnnotations = ({
           onReady: (event) => {
             console.log('Rutube Player готов:', event);
             setPlayerReady(true);
-            setStatusMessage("Плеер готов! 🎬");
+            setStatusMessage("Плеер готов! Ожидание аннотаций... 🎬");
             
             const canvas = canvasRef.current;
             if (canvas) {
@@ -263,33 +245,12 @@ const VideoPlayerWithAnnotations = ({
               canvas.height = 473;
             }
 
-            setTimeout(() => {
-              if (rutubePlayerRef.current) {
-                rutubePlayerRef.current.play();
-                isVideoPlayingRef.current = true;
-                console.log('Запускаем видео автоматически');
-              }
-            }, 1000);
+            isVideoInitializedRef.current = true;
           },
           onStateChange: (event) => {
             console.log('Состояние плеера изменилось:', event);
             
-            if (event.playerState.PLAYING) {
-              isVideoPlayingRef.current = true;
-              console.log('Видео воспроизводится');
-              
-              if (frameQueueRef.current.length > 0 && !isPlaying) {
-                startSynchronizedPlayback();
-              }
-            }
-            
-            if (event.playerState.PAUSED) {
-              isVideoPlayingRef.current = false;
-              console.log('Видео поставлено на паузу');
-            }
-            
             if (event.playerState.ENDED) {
-              isVideoPlayingRef.current = false;
               console.log('Видео завершено');
               if (onProcessingComplete) {
                 onProcessingComplete();
@@ -390,10 +351,8 @@ const VideoPlayerWithAnnotations = ({
       ?.map(obj => obj.recognized_text.trim()) || [];
     
     if (newTexts.length > 0) {
-      // Обновляем бегущую строку
       setRecognizedTexts(prev => [...prev, ...newTexts].slice(-10));
       
-      // Добавляем уникальные тексты
       setUniqueTexts(prevUnique => {
         const updatedUnique = new Set(prevUnique);
         const newUniqueTexts = [];
@@ -414,74 +373,28 @@ const VideoPlayerWithAnnotations = ({
     }
   }, []);
 
-  const syncVideoToTime = useCallback((targetTime) => {
-    if (rutubePlayerRef.current && isVideoPlayingRef.current) {
-      const currentTime = rutubePlayerRef.current.currentDuration();
-      const timeDiff = Math.abs(currentTime - targetTime);
-      
-      if (timeDiff > 1.0) {
-        console.log(`Синхронизация: текущее время ${currentTime}s, целевое ${targetTime}s`);
-        rutubePlayerRef.current.seekTo({ time: targetTime });
-      }
-    }
-  }, []);
-
-  const controlVideoPlayback = useCallback(() => {
-    const currentFrameIndex = currentFrameIndexRef.current;
-    const nextFrameIndex = currentFrameIndex + 1;
-    
-    if (frameQueueRef.current.length <= nextFrameIndex) {
-      setWaitingForFrame(true);
-      
-      if (rutubePlayerRef.current && isVideoPlayingRef.current) {
-        rutubePlayerRef.current.pause();
-      }
-      
-      playbackTimeoutRef.current = setTimeout(() => {
-        controlVideoPlayback();
-      }, 100);
+  // Функция для показа конкретного кадра
+  const showFrame = useCallback((frameIndex) => {
+    if (frameIndex < 0 || frameIndex >= frameQueueRef.current.length) {
       return;
     }
 
-    const nextFrame = frameQueueRef.current[nextFrameIndex];
-    if (nextFrame) {
-      syncVideoToTime(nextFrame.timestamp);
-      
-      processFrameData(nextFrame);
-      currentFrameIndexRef.current = nextFrameIndex;
-      
-      setWaitingForFrame(false);
-      
-      if (rutubePlayerRef.current && !isVideoPlayingRef.current) {
-        rutubePlayerRef.current.play();
-      }
-      
-      const currentFrame = frameQueueRef.current[currentFrameIndex];
-      const frameInterval = nextFrame.timestamp - (currentFrame?.timestamp || 0);
-      const delay = Math.max(frameInterval * 1000, 100);
-      
-      playbackTimeoutRef.current = setTimeout(() => {
-        controlVideoPlayback();
-      }, delay);
-    }
-  }, [syncVideoToTime, processFrameData]);
+    const frameData = frameQueueRef.current[frameIndex];
+    if (!frameData) return;
 
-  const startSynchronizedPlayback = useCallback(() => {
-    if (frameQueueRef.current.length > 0 && !isPlaying && playerReady) {
-      console.log('Начинаем синхронизированное воспроизведение');
-      setIsPlaying(true);
-      
-      const firstFrame = frameQueueRef.current[0];
-      processFrameData(firstFrame);
-      currentFrameIndexRef.current = 0;
-      
-      syncVideoToTime(firstFrame.timestamp);
-      
-      setTimeout(() => {
-        controlVideoPlayback();
-      }, 500);
+    console.log(`Показываем кадр ${frameIndex}, время: ${frameData.timestamp}s`);
+    
+    // Обновляем аннотации
+    processFrameData(frameData);
+    currentFrameIndexRef.current = frameIndex;
+    
+    // Позиционируем видео на нужное время
+    if (rutubePlayerRef.current && isVideoInitializedRef.current) {
+      rutubePlayerRef.current.seekTo({ time: frameData.timestamp });
     }
-  }, [isPlaying, playerReady, processFrameData, syncVideoToTime, controlVideoPlayback]);
+    
+    setWaitingForNextFrame(false);
+  }, [processFrameData]);
 
   useEffect(() => {
     if (!videoUrl) return;
@@ -503,28 +416,32 @@ const VideoPlayerWithAnnotations = ({
     };
   }, [videoUrl, initializeRutubePlayer]);
 
+  // Основная логика: при получении новой аннотации показываем следующий кадр
   useEffect(() => {
-    if (frameDataStream) {
+    if (frameDataStream && !isProcessingNewFrameRef.current) {
+      isProcessingNewFrameRef.current = true;
+      
       console.log('Получен новый кадр:', frameDataStream);
       frameQueueRef.current.push(frameDataStream);
       
-      if (playerReady && isVideoPlayingRef.current && !isPlaying) {
-        startSynchronizedPlayback();
+      if (playerReady && isVideoInitializedRef.current) {
+        const newFrameIndex = frameQueueRef.current.length - 1;
+        
+        // Показываем новый кадр сразу же
+        showFrame(newFrameIndex);
+        setStatusMessage("Синхронизация с аннотациями ⚡");
       }
+      
+      // Сбрасываем флаг через небольшую задержку
+      setTimeout(() => {
+        isProcessingNewFrameRef.current = false;
+      }, 10);
     }
-  }, [frameDataStream, playerReady, isPlaying, startSynchronizedPlayback]);
+  }, [frameDataStream, playerReady, showFrame]);
 
   useEffect(() => {
     drawAnnotations();
   }, [drawAnnotations]);
-
-  useEffect(() => {
-    return () => {
-      if (playbackTimeoutRef.current) {
-        clearTimeout(playbackTimeoutRef.current);
-      }
-    };
-  }, []);
 
   if (error) {
     return (
@@ -678,7 +595,7 @@ const VideoPlayerWithAnnotations = ({
               }}
             />
 
-            {waitingForFrame && playerReady && (
+            {waitingForNextFrame && playerReady && (
               <Box
                 position="absolute"
                 top="20px"
@@ -694,7 +611,7 @@ const VideoPlayerWithAnnotations = ({
                   animation: `${pulse} 1s infinite`
                 }}
               >
-                ⏳ Ожидание кадра...
+                ⏳ Ожидание аннотации...
               </Box>
             )}
 
@@ -828,54 +745,6 @@ const VideoPlayerWithAnnotations = ({
                   </Flex>
                 </Box>
               )}
-              
-              {recognizedTexts.length > 0 && (
-                <Box
-                  position="relative"
-                  bg="white"
-                  borderRadius="12px"
-                  border="2px solid #4B8BFC"
-                  p={4}
-                  minHeight="60px"
-                  overflow="hidden"
-                >
-                  <Text 
-                    fontWeight="600" 
-                    color="#023BA3" 
-                    mb={2}
-                    fontSize="sm"
-                  >
-                    📝 Распознанный текст в реальном времени:
-                  </Text>
-                  <Box
-                    position="relative"
-                    width="100%"
-                    height="30px"
-                    overflow="hidden"
-                  >
-                    {recognizedTexts.slice(-3).map((text, index) => (
-                      <Text
-                        key={`${text}-${index}-${Date.now()}`}
-                        position="absolute"
-                        top={`${index * 10}px`}
-                        left="0"
-                        right="0"
-                        fontFamily="Montserrat, sans-serif"
-                        fontWeight="500"
-                        fontSize="14px"
-                        color="#2D3748"
-                        whiteSpace="nowrap"
-                        css={{
-                          animation: `${textFlow} 8s linear infinite`,
-                          animationDelay: `${index * 0.5}s`
-                        }}
-                      >
-                        {text}
-                      </Text>
-                    ))}
-                  </Box>
-                </Box>
-              )}
 
               {/* Статистика */}
               <Flex
@@ -894,7 +763,7 @@ const VideoPlayerWithAnnotations = ({
                 >
                   <Text fontWeight="600" color="#023BA3" mb={1}>📊 Статус:</Text>
                   <Text fontSize="xs">
-                    {isPlaying ? '▶️ Синхронизация' : '⏸️ Ожидание'}
+                    ⚡ Синхронизация
                   </Text>
                 </Box>
                 
@@ -917,7 +786,9 @@ const VideoPlayerWithAnnotations = ({
                   textAlign="center"
                 >
                   <Text fontWeight="600" color="#023BA3" mb={1}>⏱️ Кадры:</Text>
-                  <Text fontSize="xs">{frameQueueRef.current.length}</Text>
+                  <Text fontSize="xs">
+                    {currentFrameIndexRef.current + 1}/{frameQueueRef.current.length}
+                  </Text>
                 </Box>
 
                 <Box
