@@ -3,6 +3,9 @@ from datetime import datetime
 from decimal import Decimal
 from src.database.my_connector import db
 from src.database.models import FrameAnnotations
+from src.utils.custom_logging import get_logger
+
+log = get_logger(__name__)
 
 
 def get_all_annotations() -> List[Dict[str, Any]]:
@@ -54,21 +57,39 @@ def create_annotation(annotation: FrameAnnotations) -> int:
 
 
 def create_annotation_batch(annotations: List[FrameAnnotations]) -> List[int]:
+
     query = """
         INSERT INTO frame_annotations (video_session_id, frame_timestamp, annotation_data)
         VALUES (%s, %s, %s)
     """
-    params_list = [
-        (ann.VideoSessionID, ann.FrameTimestamp, ann.AnnotationData)
-        for ann in annotations
-    ]
-    # Since db.execute_batch is removed, we'll use a loop for now.
-    # This is less efficient but maintains functionality.
-    # For true batching, my_connector.py would need execute_batch with executemany.
+    
+    params_list = []
+    for i, ann in enumerate(annotations):
+        try:
+            annotation_data_json = json.dumps(ann.AnnotationData, ensure_ascii=False)
+            
+            params_list.append((
+                ann.VideoSessionID, 
+                ann.FrameTimestamp, 
+                annotation_data_json
+            ))
+            
+        except Exception as e:
+            log.error(f"Error processing annotation {i}: {e}")
+            log.error(f"Annotation data: {ann.AnnotationData}")
+            continue
+
     inserted_ids = []
-    for params in params_list:
-        cursor = db.execute_query(query, params)
-        inserted_ids.append(cursor.lastrowid)
+    try:
+        for params in params_list:
+            cursor = db.execute_query(query, params)
+            inserted_ids.append(cursor.lastrowid)
+        log.info(f"Successfully inserted {len(inserted_ids)} annotations")
+    except Exception as e:
+        log.error(f"Database error while inserting annotations: {e}")
+        log.error(f"Sample params: {params_list[0] if params_list else 'None'}")
+        raise
+        
     return inserted_ids
 
 

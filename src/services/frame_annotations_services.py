@@ -1,96 +1,93 @@
 from typing import Optional, Dict, Any, List
-from datetime import datetime
-from src.repository import user_repository
-from src.database.models import Users
+from datetime import datetime, timedelta
+from decimal import Decimal
+from src.repository import frame_annotations_repository
+from src.database.models import FrameAnnotations
 from fastapi import HTTPException, status
-from src.utils.exam_services import check_for_duplicates, check_if_exists
 from src.utils.custom_logging import get_logger
 
 log = get_logger(__name__)
 
 
-def get_all_users() -> List[Users]:
-    users = user_repository.get_all_users()
-    return [Users(**user) for user in users]
+def get_all_annotations() -> List[FrameAnnotations]:
+    annotations = frame_annotations_repository.get_all_annotations()
+    return [FrameAnnotations(**annotation) for annotation in annotations]
 
 
-def get_user_by_id(user_id: int) -> Users:
-    user = user_repository.get_user_by_id(user_id)
-    if not user:
+def get_annotation_by_id(annotation_id: int) -> FrameAnnotations:
+    annotation = frame_annotations_repository.get_annotation_by_id(annotation_id)
+    if not annotation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail='User not found'
+            detail='Frame annotation not found'
         )
-    return Users(**user)
+    return FrameAnnotations(**annotation)
 
 
-def get_user_by_fingerprint(fingerprint_hash: str) -> Optional[Users]:
-    user = user_repository.get_user_by_fingerprint(fingerprint_hash)
-    return Users(**user) if user else None
+def get_annotations_by_video_session(video_session_id: int) -> List[FrameAnnotations]:
+    annotations = frame_annotations_repository.get_annotations_by_video_session(video_session_id)
+    return [FrameAnnotations(**annotation) for annotation in annotations]
 
 
-def create_user(fingerprint_hash: str) -> Users:
-    check_if_exists(
-        get_all=get_all_users,
-        attr_name="FingerprintHash",
-        attr_value=fingerprint_hash,
-        exception_detail='User with this fingerprint already exists'
+def get_annotations_by_timestamp_range(
+    video_session_id: int,
+    start_time: Decimal,
+    end_time: Decimal
+) -> List[FrameAnnotations]:
+    annotations = frame_annotations_repository.get_annotations_by_timestamp_range(
+        video_session_id, start_time, end_time
+    )
+    return [FrameAnnotations(**annotation) for annotation in annotations]
+
+
+def get_latest_annotations(video_session_id: int, limit: int = 10) -> List[FrameAnnotations]:
+    annotations = frame_annotations_repository.get_latest_annotations(video_session_id, limit)
+    return [FrameAnnotations(**annotation) for annotation in annotations]
+
+
+def create_annotation(
+    video_session_id: int,
+    frame_timestamp: Decimal,
+    annotation_data: Dict[str, Any]
+) -> FrameAnnotations:
+    annotation = FrameAnnotations(
+        VideoSessionID=video_session_id,
+        FrameTimestamp=frame_timestamp,
+        AnnotationData=annotation_data
     )
 
-    current_time = datetime.utcnow()
-    user = Users(
-        fingerprint_hash=fingerprint_hash,
-        first_visit=current_time,
-        last_activity=current_time,
-        total_sessions=0,
-        total_videos_processed=0
-    )
-
-    user_id = user_repository.create_user(user)
-    return get_user_by_id(user_id)
+    annotation_id = frame_annotations_repository.create_annotation(annotation)
+    return get_annotation_by_id(annotation_id)
 
 
-def create_or_get_anonymous_user() -> Users:
-    anonymous_fingerprint = "anonymous_user"
-    existing_user = get_user_by_fingerprint(anonymous_fingerprint)
-    if existing_user:
-        return existing_user
-    return create_user(anonymous_fingerprint)
+def create_annotation_batch(annotations: List[FrameAnnotations]) -> List[FrameAnnotations]:
+    if not annotations:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Annotations list cannot be empty"
+        )
+
+    annotation_ids = frame_annotations_repository.create_annotation_batch(annotations)
+    
+    created_annotations = []
+    for ann_id in annotation_ids:
+        created_annotations.append(get_annotation_by_id(ann_id))
+    return created_annotations
 
 
-def get_or_create_user(fingerprint_hash: str) -> Users:
-    existing_user = get_user_by_fingerprint(fingerprint_hash)
-    if existing_user:
-        return existing_user
-    return create_user(fingerprint_hash)
-
-
-def update_user_activity(user_id: int) -> Dict[str, str]:
-    get_user_by_id(user_id)
-    user_repository.update_user_activity(user_id, datetime.utcnow())
-    return {"message": "User activity updated successfully"}
-
-
-def increment_user_videos(user_id: int) -> Dict[str, str]:
-    get_user_by_id(user_id)
-    user_repository.increment_videos_processed(user_id)
-    return {"message": "User video count incremented successfully"}
-
-
-def update_user_fields(user_id: int, updates: Dict[str, Any]) -> Dict[str, str]:
-    get_user_by_id(user_id)
+def update_annotation_fields(annotation_id: int, updates: Dict[str, Any]) -> Dict[str, str]:
+    get_annotation_by_id(annotation_id) # Check if exists
 
     allowed_fields = {
-        "last_activity": datetime,
-        "total_sessions": int,
-        "total_videos_processed": int
+        "frame_timestamp": Decimal,
+        "annotation_data": dict
     }
 
     filtered_updates = {}
     for field, value in updates.items():
-        if field in allowed_fields:
-            if field == "last_activity" and isinstance(value, str):
-                filtered_updates[field] = datetime.fromisoformat(value)
+        if field in allowed_fields and value is not None:
+            if field == "frame_timestamp" and isinstance(value, (int, float, str)):
+                filtered_updates[field] = Decimal(str(value))
             else:
                 filtered_updates[field] = value
 
@@ -100,40 +97,182 @@ def update_user_fields(user_id: int, updates: Dict[str, Any]) -> Dict[str, str]:
             detail="No valid fields to update"
         )
 
-    user_repository.update_user(user_id, filtered_updates)
-    return {"message": "User updated successfully"}
+    frame_annotations_repository.update_annotation(annotation_id, filtered_updates)
+    return {"message": "Frame annotation updated successfully"}
 
 
-def delete_user(user_id: int) -> Dict[str, str]:
-    get_user_by_id(user_id)
-    user_repository.delete_user(user_id)
-    return {"message": "User deleted successfully"}
+def delete_annotation(annotation_id: int) -> Dict[str, str]:
+    get_annotation_by_id(annotation_id) # Check if exists
+    frame_annotations_repository.delete_annotation(annotation_id)
+    return {"message": "Frame annotation deleted successfully"}
 
 
-def get_active_users() -> List[Users]:
-    users = user_repository.get_users_by_activity_period(
-        datetime.utcnow().replace(day=1),
-        datetime.utcnow()
-    )
-    return [Users(**user) for user in users]
-
-
-def get_user_statistics(user_id: int) -> Dict[str, Any]:
-    user = get_user_by_id(user_id)
+def delete_annotations_by_video_session(video_session_id: int) -> Dict[str, Any]:
+    deleted_count = frame_annotations_repository.delete_annotations_by_video_session(video_session_id)
     return {
-        "user_id": user.ID,
-        "total_sessions": user.TotalSessions,
-        "total_videos_processed": user.TotalVideosProcessed,
-        "first_visit": user.FirstVisit,
-        "last_activity": user.LastActivity,
-        "days_since_first_visit": (datetime.utcnow() - user.FirstVisit).days
+        "message": "Video session annotations deleted successfully",
+        "deleted_count": deleted_count
     }
 
 
-def get_users_by_activity_range(start_date: datetime, end_date: datetime) -> List[Users]:
-    users = user_repository.get_users_by_activity_period(start_date, end_date)
-    return [Users(**user) for user in users]
+def get_video_session_statistics(video_session_id: int) -> Dict[str, Any]:
+    total_count = frame_annotations_repository.get_annotation_count_by_video_session(video_session_id)
+    annotations = get_annotations_by_video_session(video_session_id)
+
+    if not annotations:
+        return {
+            "video_session_id": video_session_id,
+            "total_annotations": 0,
+            "duration": None,
+            "average_interval": None
+        }
+
+    timestamps = [ann.FrameTimestamp for ann in annotations]
+    duration = max(timestamps) - min(timestamps)
+    average_interval = duration / (len(timestamps) - 1) if len(timestamps) > 1 else None
+
+    return {
+        "video_session_id": video_session_id,
+        "total_annotations": total_count,
+        "duration": float(duration),
+        "average_interval": float(average_interval) if average_interval else None,
+        "first_timestamp": float(min(timestamps)),
+        "last_timestamp": float(max(timestamps))
+    }
 
 
-def get_active_users_count() -> int:
-    return user_repository.get_active_users_count()
+def get_annotations_by_date_range(start_date: datetime, end_date: datetime) -> List[FrameAnnotations]:
+    annotations = frame_annotations_repository.get_annotations_by_date_range(start_date, end_date)
+    return [FrameAnnotations(**annotation) for annotation in annotations]
+
+
+def get_video_session_timeline(video_session_id: int) -> List[Dict[str, Any]]:
+    timeline_data = frame_annotations_repository.get_video_session_timeline(video_session_id)
+    return timeline_data
+
+
+def search_annotations_by_content(video_session_id: int, search_term: str) -> List[FrameAnnotations]:
+    if not search_term.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Search term cannot be empty"
+        )
+
+    annotations = frame_annotations_repository.search_annotations_by_content(video_session_id, search_term)
+    return [FrameAnnotations(**annotation) for annotation in annotations]
+
+
+def get_annotation_density_analysis(video_session_id: int, interval_seconds: int = 10) -> List[Dict[str, Any]]:
+    annotations = get_annotations_by_video_session(video_session_id)
+
+    if not annotations:
+        return []
+
+    interval_decimal = Decimal(str(interval_seconds))
+    min_timestamp = min(ann.FrameTimestamp for ann in annotations)
+    max_timestamp = max(ann.FrameTimestamp for ann in annotations)
+
+    intervals = []
+    current_start = min_timestamp
+
+    while current_start <= max_timestamp:
+        current_end = current_start + interval_decimal
+        count = sum(
+            1 for ann in annotations
+            if current_start <= ann.FrameTimestamp < current_end
+        )
+
+        intervals.append({
+            "start_time": float(current_start),
+            "end_time": float(current_start + interval_decimal), # Use current_start + interval_decimal for end_time
+            "annotation_count": count
+        })
+
+        current_start = current_end
+
+    return intervals
+
+
+def export_annotations_for_video_session(video_session_id: int) -> Dict[str, Any]:
+    annotations = get_annotations_by_video_session(video_session_id)
+    statistics = get_video_session_statistics(video_session_id)
+
+    return {
+        "video_session_id": video_session_id,
+        "export_timestamp": datetime.utcnow(),
+        "statistics": statistics,
+        "annotations": [
+            {
+                "id": ann.ID,
+                "timestamp": float(ann.FrameTimestamp),
+                "data": ann.AnnotationData,
+                "created_at": ann.CreatedAt
+            }
+            for ann in annotations
+        ]
+    }
+
+
+def cleanup_old_annotations(days_old: int = 90) -> Dict[str, Any]:
+    cutoff_date = datetime.utcnow() - timedelta(days=days_old)
+    old_annotations = get_annotations_by_date_range(
+        datetime.min,
+        cutoff_date
+    )
+
+    deleted_count = 0
+    if old_annotations:
+        for annotation in old_annotations:
+            frame_annotations_repository.delete_annotation(annotation.ID)
+            deleted_count += 1
+
+    return {
+        "message": f"Cleaned up {deleted_count} old annotations",
+        "deleted_count": deleted_count
+    }
+
+
+def get_annotations_summary_by_content_type(video_session_id: int) -> Dict[str, int]:
+    annotations = get_annotations_by_video_session(video_session_id)
+    content_types = {}
+
+    for annotation in annotations:
+        annotation_data = annotation.AnnotationData
+        if isinstance(annotation_data, dict):
+            for key in annotation_data.keys():
+                content_types[key] = content_types.get(key, 0) + 1
+
+    return content_types
+
+
+def create_annotation_batch_from_recognition_results(
+    video_session_id: int,
+    recognition_results: List[Dict[str, Any]]
+) -> List[FrameAnnotations]:
+
+    annotations_to_create = []
+    for frame_data in recognition_results:
+        frame_number = frame_data.frame_number
+        timestamp = frame_data.timestamp
+        tracked_objects = frame_data.tracked_objects
+
+        frame_timestamp_decimal = Decimal(str(timestamp))
+
+        annotation_data = {
+            "frame_number": frame_number,
+            "tracked_objects": tracked_objects
+        }
+
+        annotations_to_create.append(
+            FrameAnnotations(
+                VideoSessionID=video_session_id,
+                FrameTimestamp=frame_timestamp_decimal,
+                AnnotationData=annotation_data
+            )
+        )
+    
+    if annotations_to_create:
+        log.info(f"Saving {len(annotations_to_create)} annotations for video session {video_session_id} to DB.")
+        created_annotations = create_annotation_batch(annotations_to_create)
+        return created_annotations
+    return []

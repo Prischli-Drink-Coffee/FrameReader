@@ -108,3 +108,4 @@ class FrameAnnotations(BaseModel):
     CreatedAt: Optional[datetime] = Field(None,
                                           alias="created_at",
                                           examples=[f"{datetime.now()}"])
+    

@@ -351,8 +351,6 @@ class VideoProcessor:
         args = {
             "video_path": self.temp_video_path,
             "model_path": params.get("model_path", None),
-            "tracker_type": params.get("tracker_type", "botsort"),
-            "tracker_config_path": params.get("tracker_config_path", None),
             "window_size_ratio": params.get("window_size_ratio", (0.7, 0.7)),
             "overlap_ratio": params.get("overlap_ratio", (0.1, 0.1)),
             "img_size": params.get("img_size", 640),
@@ -360,28 +358,25 @@ class VideoProcessor:
             "iou": params.get("iou", 0.1),
             "nms_global": params.get("nms_global", 0.1),
             "classes": params.get("classes", [0]),
-            "device": params.get("device"),
             "tracker_detection_source": params.get("tracker_detection_source", "main"),
-            "triton_stream_url": params.get("triton_stream_url", TRITON_HTTP_URL),
-            "triton_ws_url": params.get("triton_ws_url", TRITON_WS_URL),
-            "triton_batch_url": params.get("triton_batch_url", TRITON_HTTP_URL),
-            "triton_model_name": params.get("triton_model_name", "yolo"),
-            "triton_chunk_size": params.get("triton_chunk_size", 1),
+            # "triton_stream_url": params.get("triton_stream_url", TRITON_HTTP_URL),
+            # "triton_ws_url": params.get("triton_ws_url", TRITON_WS_URL),
+            # "triton_batch_url": params.get("triton_batch_url", TRITON_HTTP_URL),
+            # "triton_model_name": params.get("triton_model_name", "yolo"),
+            # "triton_chunk_size": params.get("triton_chunk_size", 1),
             "donut_detection_source": params.get("donut_detection_source", "main"),
             "donut_triton_main_url": params.get("donut_triton_main_url", TRITON_HTTP_URL),
-            "donut_triton_stream_url": params.get("donut_triton_stream_url", TRITON_HTTP_URL),
-            "donut_triton_ws_url": params.get("donut_triton_ws_url", TRITON_WS_URL),
-            "donut_model_name": params.get("donut_model_name", "donut"),
+            # "donut_triton_stream_url": params.get("donut_triton_stream_url", TRITON_HTTP_URL),
+            # "donut_triton_ws_url": params.get("donut_triton_ws_url", TRITON_WS_URL),
+            # "donut_model_name": params.get("donut_model_name", "donut"),
             "history_length": params.get("history_length", 24),
-            "include_annotated_frame": params.get("include_annotated_frame", False),
-            "show_labels": params.get("show_labels", False)
         }
         
-        log.info(f"Recognition args validation:")
-        log.info(f"  video_path: {args['video_path']} (exists: {Path(args['video_path']).exists() if args['video_path'] else False})")
-        log.info(f"  conf threshold: {args['conf']}")
-        log.info(f"  classes: {args['classes']}")
-        log.info(f"  triton_urls: {args['triton_stream_url']}")
+        # log.info(f"Recognition args validation:")
+        # log.info(f"  video_path: {args['video_path']} (exists: {Path(args['video_path']).exists() if args['video_path'] else False})")
+        # log.info(f"  conf threshold: {args['conf']}")
+        # log.info(f"  classes: {args['classes']}")
+        # log.info(f"  triton_urls: {args['triton_stream_url']}")
         
         return args
     
@@ -446,10 +441,9 @@ class VideoProcessor:
             }
     
     async def _save_buffered_results(self, buffered_results: List[Any]) -> None:
-        for frame_data in buffered_results:
-            await frame_annotations_services.create_annotation_batch_from_recognition_results(
-                self.session_id, frame_data
-            )
+        await frame_annotations_services.create_annotation_batch_from_recognition_results(
+            self.session_id, buffered_results
+        )
         log.info(f"Saved {len(buffered_results)} frames for session {self.session_id}")
     
     def cleanup(self) -> None:
