@@ -6,7 +6,7 @@
 
 ## Демонстрация работы
 
-
+https://github.com/user-attachments/assets/e1aa6b89-5651-44a4-b153-5d8003bdd3ad
 
 ---
 
