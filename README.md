@@ -1,1 +1,2 @@
 [Отчёт по проекту в формате pdf доступен по этой ссылке](./docs/report_compressed.pdf)
+[Презентация](./docs/FrameReader.pptx)
