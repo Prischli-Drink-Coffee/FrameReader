@@ -10,7 +10,7 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List, Union, Tuple
 
 import torch
 from torch.utils.data import DataLoader
@@ -155,10 +155,97 @@ class FrameReaderTrainingPipeline:
             
             logger.info(f"Real-time inference engine setup complete for {model_type}")
             
+            # Verify special token handling
+            self._verify_special_tokens()
+            
+            # Verify precision support
+            self._verify_precision_support()
+            
         except Exception as e:
             logger.warning(f"Failed to setup real-time inference engine: {e}")
             self.realtime_engine = None
             self.inference_displayer = None
+    
+    def _verify_special_tokens(self) -> None:
+        """Verify that special tokens are properly loaded and configured."""
+        if not hasattr(self.model, 'processor') or self.model.processor is None:
+            logger.warning("Model processor not available for special token verification")
+            return
+            
+        tokenizer = self.model.processor.tokenizer
+        
+        # Check essential token attributes
+        tokens_to_check = {
+            'pad_token': tokenizer.pad_token,
+            'eos_token': tokenizer.eos_token,
+            'unk_token': tokenizer.unk_token,
+            'bos_token': getattr(tokenizer, 'bos_token', None)
+        }
+        
+        token_ids_to_check = {
+            'pad_token_id': tokenizer.pad_token_id,
+            'eos_token_id': tokenizer.eos_token_id,
+            'unk_token_id': getattr(tokenizer, 'unk_token_id', None),
+            'bos_token_id': getattr(tokenizer, 'bos_token_id', None)
+        }
+        
+        logger.info("🔍 Special Token Verification:")
+        for name, token in tokens_to_check.items():
+            logger.info(f"  {name}: {repr(token)}")
+            
+        logger.info("🔍 Special Token IDs:")
+        for name, token_id in token_ids_to_check.items():
+            logger.info(f"  {name}: {token_id}")
+        
+        # Check for potential issues
+        issues = []
+        if tokenizer.pad_token_id is None or not isinstance(tokenizer.pad_token_id, int):
+            issues.append("pad_token_id is not properly set")
+        if tokenizer.eos_token_id is None or not isinstance(tokenizer.eos_token_id, int):
+            issues.append("eos_token_id is not properly set")
+            
+        if issues:
+            logger.warning("⚠️  Special token issues detected:")
+            for issue in issues:
+                logger.warning(f"  - {issue}")
+        else:
+            logger.info("✅ Special tokens verification passed")
+    
+    def _verify_precision_support(self) -> None:
+        """Verify that the requested precision is supported and properly configured."""
+        precision = self.config_manager.model.precision
+        device = self.model.device
+        
+        logger.info(f"🔍 Precision Support Verification: {precision} on {device}")
+        
+        if precision == "fp32":
+            logger.info("✅ FP32 precision - universally supported")
+            
+        elif precision == "fp16":
+            if device.type == 'cuda':
+                try:
+                    # Test FP16 support
+                    test_tensor = torch.randn(2, 2, device=device, dtype=torch.float16)
+                    test_result = test_tensor @ test_tensor.T
+                    logger.info("✅ FP16 precision - CUDA support verified")
+                except Exception as e:
+                    logger.error(f"❌ FP16 precision not supported: {e}")
+            else:
+                logger.warning("⚠️  FP16 precision - limited support on CPU")
+                
+        elif precision == "bf16":
+            if device.type == 'cuda':
+                if torch.cuda.is_bf16_supported():
+                    try:
+                        test_tensor = torch.randn(2, 2, device=device, dtype=torch.bfloat16)
+                        test_result = test_tensor @ test_tensor.T
+                        logger.info("✅ BF16 precision - CUDA support verified") 
+                    except Exception as e:
+                        logger.error(f"❌ BF16 precision not supported: {e}")
+                else:
+                    logger.warning("⚠️  BF16 precision - not supported by this GPU")
+            else:
+                logger.warning("⚠️  BF16 precision - limited support on CPU")
     
     def _setup_enhanced_checkpointing(self, output_dir: Path) -> None:
         """Setup enhanced checkpointing system."""
