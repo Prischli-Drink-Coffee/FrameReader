@@ -5,8 +5,10 @@ Demonstrates the new OOP architecture with two-stage training.
 """
 
 import argparse
+import json
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -20,6 +22,8 @@ from models.trocr import TrOCROCRModel
 from data.dataset import DonutDataset, TrOCRDataset
 from training.trainer import TwoStageTrainer
 from visualization.inference import InferenceVisualizer
+from visualization.realtime_inference import RealtimeInferenceEngine, TrainingInferenceDisplayer
+from visualization.attention import AttentionVisualizer
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +40,8 @@ class FrameReaderTrainingPipeline:
         self.model = None
         self.trainer = None
         self.visualizer = InferenceVisualizer()
+        self.realtime_engine = None
+        self.inference_displayer = None
     
     def _load_or_create_config(self, config_path: Optional[Path]) -> ConfigManager:
         """Load configuration or create default."""
@@ -57,6 +63,9 @@ class FrameReaderTrainingPipeline:
             raise ValueError(f"Unsupported model type: {model_type}")
         
         logger.info(f"Model {model_type} setup complete")
+        
+        # Setup real-time inference engine for training monitoring
+        self._setup_realtime_inference(model_type)
     
     def _setup_donut_model(self, config: ModelConfig) -> DonutOCRModel:
         """Setup Donut model with configuration."""
@@ -124,6 +133,239 @@ class FrameReaderTrainingPipeline:
         model.to_device(config.precision)
         
         return model
+    
+    def _setup_realtime_inference(self, model_type: str = "donut") -> None:
+        """Setup real-time inference engine for training monitoring."""
+        try:
+            # Create realtime inference engine
+            self.realtime_engine = RealtimeInferenceEngine(
+                model=self.model,
+                device=self.model.device,
+                precision=self.config_manager.model.precision,
+                max_length=min(64, self.config_manager.model.max_length),  # Shorter for speed
+                num_beams=1  # Fast greedy decoding for real-time display
+            )
+            
+            # Create inference displayer
+            display_interval = getattr(self.config_manager.training, 'inference_display_interval', 100)
+            self.inference_displayer = TrainingInferenceDisplayer(
+                self.realtime_engine, 
+                display_interval=display_interval
+            )
+            
+            logger.info(f"Real-time inference engine setup complete for {model_type}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to setup real-time inference engine: {e}")
+            self.realtime_engine = None
+            self.inference_displayer = None
+    
+    def _setup_enhanced_checkpointing(self, output_dir: Path) -> None:
+        """Setup enhanced checkpointing system."""
+        self.checkpoint_dir = output_dir / "checkpoints"
+        self.checkpoint_dir.mkdir(exist_ok=True)
+        
+        # Configure trainer for enhanced checkpointing
+        if hasattr(self.trainer, 'enable_enhanced_checkpointing'):
+            self.trainer.enable_enhanced_checkpointing(
+                self.checkpoint_dir,
+                save_tokenizer=True,
+                save_processor=True,
+                save_training_state=True
+            )
+        
+        logger.info(f"Enhanced checkpointing setup at {self.checkpoint_dir}")
+    
+    def save_enhanced_checkpoint(
+        self, 
+        epoch: int, 
+        step: int, 
+        loss: float, 
+        metrics: Optional[Dict[str, float]] = None,
+        is_best: bool = False
+    ) -> Path:
+        """Save enhanced checkpoint with all necessary components."""
+        
+        checkpoint_name = f"checkpoint-epoch-{epoch:03d}-step-{step:05d}"
+        if is_best:
+            checkpoint_name += "-best"
+            
+        checkpoint_path = self.checkpoint_dir / checkpoint_name
+        checkpoint_path.mkdir(exist_ok=True)
+        
+        try:
+            # Save model weights
+            model_path = checkpoint_path / "model"
+            self.model.save_pretrained(model_path)
+            
+            # Save processor/tokenizer
+            if hasattr(self.model, 'processor') and self.model.processor is not None:
+                processor_path = checkpoint_path / "processor"
+                processor_path.mkdir(exist_ok=True)
+                self.model.processor.save_pretrained(processor_path)
+                
+                # Save tokenizer separately for clarity
+                tokenizer_path = checkpoint_path / "tokenizer" 
+                tokenizer_path.mkdir(exist_ok=True)
+                self.model.processor.tokenizer.save_pretrained(tokenizer_path)
+            
+            # Save training state
+            training_state = {
+                'epoch': epoch,
+                'step': step,
+                'loss': loss,
+                'metrics': metrics or {},
+                'model_config': self.config_manager.model.to_dict(),
+                'training_config': self.config_manager.training.to_dict(),
+                'data_config': self.config_manager.data.to_dict(),
+                'timestamp': time.time(),
+                'model_type': getattr(self.config_manager.model, 'model_type', 'unknown')
+            }
+            
+            # Save recent inference metrics if available
+            if self.inference_displayer:
+                recent_metrics = self.inference_displayer.get_recent_metrics(last_n=50)
+                training_state['inference_metrics'] = recent_metrics
+            
+            with open(checkpoint_path / "training_state.json", "w") as f:
+                json.dump(training_state, f, indent=2, ensure_ascii=False)
+            
+            # Save optimizer state if trainer has one
+            if hasattr(self.trainer, 'optimizer') and self.trainer.optimizer is not None:
+                torch.save(self.trainer.optimizer.state_dict(), checkpoint_path / "optimizer.pt")
+            
+            # Save scheduler state if trainer has one
+            if hasattr(self.trainer, 'scheduler') and self.trainer.scheduler is not None:
+                torch.save(self.trainer.scheduler.state_dict(), checkpoint_path / "scheduler.pt")
+            
+            logger.info(f"Enhanced checkpoint saved to {checkpoint_path}")
+            return checkpoint_path
+            
+        except Exception as e:
+            logger.error(f"Failed to save enhanced checkpoint: {e}")
+            raise
+    
+    def load_enhanced_checkpoint(self, checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
+        """Load enhanced checkpoint and resume training state."""
+        checkpoint_path = Path(checkpoint_path)
+        
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        
+        # Load training state
+        with open(checkpoint_path / "training_state.json", "r") as f:
+            training_state = json.load(f)
+        
+        logger.info(f"Loading checkpoint from epoch {training_state['epoch']}, step {training_state['step']}")
+        
+        # Update configs from checkpoint
+        if 'model_config' in training_state:
+            self.config_manager.model = self.config_manager.model.from_dict(training_state['model_config'])
+        if 'training_config' in training_state:
+            self.config_manager.training = self.config_manager.training.from_dict(training_state['training_config'])
+        if 'data_config' in training_state:
+            self.config_manager.data = self.config_manager.data.from_dict(training_state['data_config'])
+        
+        # Load model
+        model_type = training_state.get('model_type', 'donut')
+        self.setup_model(model_type)
+        
+        # Load model weights
+        model_path = checkpoint_path / "model"
+        if model_path.exists():
+            if hasattr(self.model.__class__, 'from_pretrained'):
+                self.model = self.model.__class__.from_pretrained(model_path)
+            else:
+                logger.warning("Model does not support from_pretrained, loading state dict")
+                # Load state dict as fallback
+                model_weights = torch.load(model_path / "pytorch_model.bin", map_location=self.model.device)
+                self.model.load_state_dict(model_weights)
+        
+        # Load processor/tokenizer
+        processor_path = checkpoint_path / "processor"
+        if processor_path.exists() and hasattr(self.model, 'processor'):
+            if hasattr(self.model.processor.__class__, 'from_pretrained'):
+                self.model.processor = self.model.processor.__class__.from_pretrained(processor_path)
+        
+        return training_state
+    
+    def _setup_attention_visualization(self, output_dir: Path) -> None:
+        """Setup attention visualization system."""
+        attention_dir = output_dir / "attention_visualizations"
+        attention_dir.mkdir(exist_ok=True)
+        
+        self.attention_visualizer = AttentionVisualizer(output_dir=attention_dir)
+        
+        # Update training config with attention save directory
+        self.config_manager.training.attention_save_dir = str(attention_dir)
+        
+        logger.info(f"Attention visualization setup at {attention_dir}")
+    
+    def visualize_model_attention(
+        self,
+        batch_data: Dict[str, torch.Tensor],
+        step: int,
+        sample_idx: int = 0
+    ) -> None:
+        """Generate and save attention visualizations."""
+        if not hasattr(self, 'attention_visualizer'):
+            return
+            
+        interval = self.config_manager.training.attention_visualization_interval
+        if step % interval != 0:
+            return
+            
+        try:
+            # Extract sample from batch
+            pixel_values = batch_data.get('pixel_values', None)
+            if pixel_values is None or pixel_values.dim() != 4:
+                return
+                
+            sample_image_tensor = pixel_values[sample_idx] if sample_idx < pixel_values.shape[0] else pixel_values[0]
+            
+            # Convert tensor to PIL Image for visualization
+            # Denormalize if needed
+            import torchvision.transforms.functional as TF
+            sample_image = TF.to_pil_image(sample_image_tensor.cpu())
+            
+            # Get attention weights from model if available
+            self.model.eval()
+            with torch.no_grad():
+                # This would need to be customized based on your model's attention output
+                # For now, we'll create a placeholder visualization
+                if hasattr(self.model, 'get_attention_weights'):
+                    attention_weights = self.model.get_attention_weights(sample_image_tensor.unsqueeze(0))
+                    
+                    # Visualize encoder attention
+                    if 'encoder_attention' in attention_weights:
+                        save_path = Path(self.config_manager.training.attention_save_dir) / f"encoder_attention_step_{step:05d}.png"
+                        self.attention_visualizer.visualize_encoder_attention(
+                            sample_image,
+                            attention_weights['encoder_attention'],
+                            save_path=save_path
+                        )
+                    
+                    # Visualize decoder attention
+                    if 'decoder_attention' in attention_weights:
+                        # Get tokens for visualization
+                        tokens = []
+                        if 'input_ids' in batch_data:
+                            sample_ids = batch_data['input_ids'][sample_idx] if sample_idx < batch_data['input_ids'].shape[0] else batch_data['input_ids'][0]
+                            if hasattr(self.model, 'processor') and self.model.processor is not None:
+                                tokens = self.model.processor.tokenizer.convert_ids_to_tokens(sample_ids.cpu().tolist())
+                        
+                        save_path = Path(self.config_manager.training.attention_save_dir) / f"decoder_attention_step_{step:05d}.png"
+                        self.attention_visualizer.visualize_decoder_attention(
+                            sample_image,
+                            tokens,
+                            attention_weights['decoder_attention'],
+                            save_path=save_path
+                        )
+                        
+                logger.info(f"Attention visualization saved for step {step}")
+                
+        except Exception as e:
+            logger.warning(f"Failed to generate attention visualization: {e}")
     
     def prepare_datasets(self, model_type: str = "donut") -> tuple:
         """Prepare training and validation datasets."""
@@ -266,7 +508,7 @@ class FrameReaderTrainingPipeline:
         logger.info(f"Two-stage training setup: {len(synthetic_samples)} synthetic, {len(real_samples)} real")
         return synthetic_dataloader, real_dataloader
     
-    def train(self, model_type: str = "donut") -> dict:
+    def train(self, model_type: str = "donut", resume_from_state: Optional[Dict[str, Any]] = None) -> dict:
         """Execute the complete training pipeline."""
         
         # Setup model
@@ -292,6 +534,13 @@ class FrameReaderTrainingPipeline:
         # Save configuration
         config_output_dir = Path(self.config_manager.training.output_dir)
         self.config_manager.save_all(config_output_dir / "configs")
+        
+        # Setup enhanced checkpointing
+        self._setup_enhanced_checkpointing(config_output_dir)
+        
+        # Setup attention visualization if enabled
+        if self.config_manager.training.enable_attention_visualization:
+            self._setup_attention_visualization(config_output_dir)
         
         # Start training
         logger.info("Starting training with enhanced architecture")
@@ -369,6 +618,21 @@ def parse_arguments():
     parser.add_argument("--learning-rate", type=float, default=5e-5, help="Learning rate")
     parser.add_argument("--two-stage", action="store_true", help="Enable two-stage training")
     
+    # Enhanced features
+    parser.add_argument("--enable-realtime-inference", action="store_true", 
+                        help="Enable real-time inference display during training")
+    parser.add_argument("--inference-interval", type=int, default=100,
+                        help="Interval for real-time inference display")
+    parser.add_argument("--enable-attention-viz", action="store_true",
+                        help="Enable attention visualization during training")
+    parser.add_argument("--attention-interval", type=int, default=500,
+                        help="Interval for attention visualization")
+    parser.add_argument("--resume-from", type=str, help="Resume training from checkpoint path")
+    
+    # Precision control
+    parser.add_argument("--precision", choices=["fp32", "fp16", "bf16"], default="bf16",
+                        help="Training precision for performance optimization")
+    
     # Inference demo
     parser.add_argument("--demo", type=str, help="Run inference demo on image")
     parser.add_argument("--model-path", type=str, help="Path to trained model for demo")
@@ -391,11 +655,32 @@ def main():
     pipeline.config_manager.training.learning_rate = args.learning_rate
     pipeline.config_manager.training.enable_two_stage = args.two_stage
     pipeline.config_manager.model.model_type = args.model_type
+    pipeline.config_manager.model.precision = args.precision
+    
+    # Enhanced features
+    if args.enable_realtime_inference:
+        pipeline.config_manager.training.inference_display_interval = args.inference_interval
+    if args.enable_attention_viz:
+        pipeline.config_manager.training.enable_attention_visualization = True
+        pipeline.config_manager.training.attention_visualization_interval = args.attention_interval
     
     try:
         if args.demo:
             # Run inference demo
             pipeline.run_inference_demo(args.demo, args.model_path)
+        elif args.resume_from:
+            # Resume training from checkpoint
+            logger.info(f"Resuming training from {args.resume_from}")
+            training_state = pipeline.load_enhanced_checkpoint(args.resume_from)
+            
+            # Continue training
+            training_history = pipeline.train(args.model_type, resume_from_state=training_state)
+            
+            logger.info("Training resumed and completed successfully!")
+            logger.info(f"Final training loss: {training_history['train_loss'][-1]:.4f}")
+            
+            if training_history.get('eval_loss'):
+                logger.info(f"Final validation loss: {training_history['eval_loss'][-1]:.4f}")
         else:
             # Run training
             training_history = pipeline.train(args.model_type)

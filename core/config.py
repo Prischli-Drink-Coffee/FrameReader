@@ -100,6 +100,12 @@ class TrainingConfig:
     synthetic_lr_factor: float = 1.0
     real_data_lr_factor: float = 0.5
     
+    # Real-time inference and visualization parameters
+    inference_display_interval: int = 100
+    enable_attention_visualization: bool = False
+    attention_visualization_interval: int = 500
+    attention_save_dir: Optional[str] = None
+    
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
         return {

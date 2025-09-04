@@ -19,7 +19,7 @@ from transformers import (
     AutoModel
 )
 
-from ..core.base import BaseEncoder, BaseDecoder, BaseOCRModel
+from core.base import BaseEncoder, BaseDecoder, BaseOCRModel
 
 logger = logging.getLogger(__name__)
 

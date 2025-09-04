@@ -18,7 +18,7 @@ try:
 except ImportError:
     OPENCV_AVAILABLE = False
 
-from ..core.config import TrainingConfig
+from core.config import TrainingConfig
 
 logger = logging.getLogger(__name__)
 

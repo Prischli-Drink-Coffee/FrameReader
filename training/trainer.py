@@ -16,10 +16,10 @@ from torch.optim import AdamW, Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
 from transformers import get_cosine_schedule_with_warmup
 
-from ..core.base import BaseOCRModel
-from ..core.config import TrainingConfig, DataConfig
-from .metrics import MetricsCalculator
-from .visualization import TrainingVisualizer
+from core.base import BaseOCRModel
+from core.config import TrainingConfig, DataConfig
+from training.metrics import MetricsCalculator
+from training.visualization import TrainingVisualizer
 
 logger = logging.getLogger(__name__)
 
