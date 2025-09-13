@@ -1,0 +1,22 @@
+{
+  "model_type": "donut",
+  "model_name_or_path": "Nyaaneet/donut-base-ru",
+  "encoder_name": null,
+  "decoder_name": null,
+  "image_size": [
+    384,
+    384
+  ],
+  "max_length": 768,
+  "hidden_size": 768,
+  "vocab_size": 50265,
+  "task_start_token": "<s>",
+  "prompt_end_token": null,
+  "decoder_start_token_id": null,
+  "precision": "bf16",
+  "enable_gradient_checkpointing": true,
+  "freeze_encoder": false,
+  "flash_attention": true,
+  "enable_torch_compile": true,
+  "hf_token": null
+}

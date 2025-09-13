@@ -10,7 +10,7 @@ wheels/
 .venv
 .ipynb_checkpoints/
 
-data/
+dataset/
 data_cache/
 donut-finetune/
 detection_models/
