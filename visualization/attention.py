@@ -7,10 +7,16 @@ from pathlib import Path
 import logging
 
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from PIL import Image
 import torch
+
+try:
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logging.warning("matplotlib/seaborn not available, attention visualization will be disabled")
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +30,9 @@ class AttentionVisualizer:
             self.output_dir.mkdir(parents=True, exist_ok=True)
         
         # Configure plotting style
-        plt.style.use('seaborn-v0_8-darkgrid')
-        sns.set_palette("viridis")
+        if MATPLOTLIB_AVAILABLE:
+            plt.style.use('seaborn-v0_8-darkgrid')
+            sns.set_palette("viridis")
     
     def visualize_encoder_attention(
         self,
@@ -187,7 +194,7 @@ class AttentionVisualizer:
     
     def _create_attention_overlay(
         self,
-        ax: plt.Axes,
+        ax: Any,  # plt.Axes when matplotlib is available
         image: Image.Image,
         attention_weights: np.ndarray,
         patch_size: Tuple[int, int]

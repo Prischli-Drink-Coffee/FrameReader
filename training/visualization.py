@@ -6,9 +6,15 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 from pathlib import Path
 import logging
 
-import matplotlib.pyplot as plt
-import matplotlib.patches as patches
-import seaborn as sns
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    import seaborn as sns
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logging.warning("matplotlib/seaborn not available, training visualization will be disabled")
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -22,9 +28,10 @@ from core.config import TrainingConfig
 
 logger = logging.getLogger(__name__)
 
-# Configure matplotlib and seaborn
-plt.style.use('seaborn-v0_8-darkgrid')
-sns.set_palette("husl")
+# Configure matplotlib and seaborn only if available
+if MATPLOTLIB_AVAILABLE:
+    plt.style.use('seaborn-v0_8-darkgrid')
+    sns.set_palette("husl")
 
 
 class TrainingVisualizer:
@@ -63,7 +70,10 @@ class TrainingVisualizer:
         
         # Plot every N epochs or at the end
         if epoch % max(1, self.config.num_epochs // 10) == 0 or epoch == self.config.num_epochs - 1:
-            self._plot_training_curves(history)
+            if MATPLOTLIB_AVAILABLE:
+                self._plot_training_curves(history)
+            else:
+                logger.warning("Skipping training curves plot: matplotlib not available")
     
     def update_two_stage_progress(
         self,
@@ -88,6 +98,9 @@ class TrainingVisualizer:
     
     def _plot_training_curves(self, history: Dict[str, List]) -> None:
         """Plot standard training curves."""
+        if not MATPLOTLIB_AVAILABLE:
+            return
+            
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=self.plot_config['figure_size'])
         
         epochs = list(range(len(history['train_loss'])))
@@ -163,6 +176,9 @@ class TrainingVisualizer:
     
     def _plot_two_stage_curves(self, history: Dict[str, List]) -> None:
         """Plot two-stage training curves with stage visualization."""
+        if not MATPLOTLIB_AVAILABLE:
+            return
+            
         fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 10))
         
         epochs = list(range(len(history['train_loss'])))

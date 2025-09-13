@@ -11,10 +11,22 @@ from pathlib import Path
 
 import torch
 from PIL import Image
-import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from ast import literal_eval
-from nltk import edit_distance
+
+try:
+    import matplotlib.pyplot as plt
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+    logging.warning("matplotlib not available, realtime inference visualization will be disabled")
+
+try:
+    from nltk import edit_distance
+    NLTK_AVAILABLE = True
+except ImportError:
+    NLTK_AVAILABLE = False
+    logging.warning("nltk not available, some text comparison features will be disabled")
 
 logger = logging.getLogger(__name__)
 
