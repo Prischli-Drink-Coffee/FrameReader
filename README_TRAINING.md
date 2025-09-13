@@ -32,7 +32,7 @@ FrameReader/
 │   ├── inference.py      # Inference result visualization
 │   ├── attention.py      # Attention mechanism visualization
 │   └── __init__.py
-└── train_enhanced.py     # Main training script
+└── train.py             # Main training script
 ```
 
 ## ✨ Key Features
@@ -135,12 +135,12 @@ config.save_all('./configs')
 "
 
 # Train with custom configuration
-python train_enhanced.py --config ./configs --data-dir ./data
+python train.py --config ./configs --data-dir ./data
 ```
 
 ## 📈 Two-Stage Training
 
-The enhanced system supports sophisticated two-stage training:
+The system supports sophisticated two-stage training:
 
 ### Stage 1: Synthetic Data
 - High-volume synthetic data training
@@ -259,7 +259,7 @@ ModelConfig(
 
 ### Training Pipeline
 ```python
-from train_enhanced import FrameReaderTrainingPipeline
+from train import FrameReaderTrainingPipeline
 
 pipeline = FrameReaderTrainingPipeline()
 pipeline.config_manager.training.enable_two_stage = True
@@ -330,7 +330,7 @@ viz_config = VisualizationConfig(
 
 ## 🎯 Design Principles
 
-This enhanced system follows strict software engineering principles:
+This system follows strict software engineering principles:
 
 1. **Single Responsibility**: Each class has one clear purpose
 2. **Open/Closed Principle**: Easy to extend, hard to break
@@ -377,7 +377,7 @@ aug_manager = AugmentationManager(aug_config)
 
 ## 🎉 Results
 
-The enhanced architecture provides:
+The architecture provides:
 - **40% faster training** through optimizations
 - **Better convergence** with two-stage training  
 - **Improved maintainability** through OOP design
@@ -394,4 +394,4 @@ The enhanced architecture provides:
 
 ---
 
-This enhanced system represents a complete architectural overhaul of the original FrameReader training pipeline, providing enterprise-grade features while maintaining simplicity and extensibility.
+This system represents a complete architectural overhaul of the original FrameReader training pipeline, providing enterprise-grade features while maintaining simplicity and extensibility.

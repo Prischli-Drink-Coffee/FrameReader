@@ -22,10 +22,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def demonstrate_enhanced_features():
-    """Demonstrate the enhanced features integrated from old implementations."""
+def demonstrate_features():
+    """Demonstrate the features integrated from old implementations."""
     
-    print("🚀 FrameReader Enhanced Training System Demonstration")
+    print("🚀 FrameReader Training System Demonstration")
     print("=" * 60)
     
     # 1. Demonstrate dataset loading
@@ -119,7 +119,7 @@ def demonstrate_enhanced_features():
     print("-" * 35)
     
     try:
-        from train_enhanced import FrameReaderTrainingPipeline
+        from train import FrameReaderTrainingPipeline
         
         # Create temporary config
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -179,4 +179,4 @@ def demonstrate_enhanced_features():
 
 
 if __name__ == "__main__":
-    demonstrate_enhanced_features()
+    demonstrate_features()

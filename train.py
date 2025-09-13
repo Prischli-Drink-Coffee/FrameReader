@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FrameReader OCR System - Enhanced Training Script
+FrameReader OCR System - Training Script
 Demonstrates the new OOP architecture with two-stage training.
 """
 
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 class FrameReaderTrainingPipeline:
-    """Main training pipeline with enhanced architecture."""
+    """Main training pipeline with modular architecture."""
     
     def __init__(self, config_path: Optional[Path] = None):
         self.config_manager = self._load_or_create_config(config_path)
@@ -247,14 +247,14 @@ class FrameReaderTrainingPipeline:
             else:
                 logger.warning("⚠️  BF16 precision - limited support on CPU")
     
-    def _setup_enhanced_checkpointing(self, output_dir: Path) -> None:
+    def _setup_checkpointing(self, output_dir: Path) -> None:
         """Setup enhanced checkpointing system."""
         self.checkpoint_dir = output_dir / "checkpoints"
         self.checkpoint_dir.mkdir(exist_ok=True)
         
         # Configure trainer for enhanced checkpointing
-        if hasattr(self.trainer, 'enable_enhanced_checkpointing'):
-            self.trainer.enable_enhanced_checkpointing(
+        if hasattr(self.trainer, 'enable_checkpointing'):
+            self.trainer.enable_checkpointing(
                 self.checkpoint_dir,
                 save_tokenizer=True,
                 save_processor=True,
@@ -263,7 +263,7 @@ class FrameReaderTrainingPipeline:
         
         logger.info(f"Enhanced checkpointing setup at {self.checkpoint_dir}")
     
-    def save_enhanced_checkpoint(
+    def save_checkpoint(
         self, 
         epoch: int, 
         step: int, 
@@ -332,7 +332,7 @@ class FrameReaderTrainingPipeline:
             logger.error(f"Failed to save enhanced checkpoint: {e}")
             raise
     
-    def load_enhanced_checkpoint(self, checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
+    def load_checkpoint(self, checkpoint_path: Union[str, Path]) -> Dict[str, Any]:
         """Load enhanced checkpoint and resume training state."""
         checkpoint_path = Path(checkpoint_path)
         
@@ -623,7 +623,7 @@ class FrameReaderTrainingPipeline:
         self.config_manager.save_all(config_output_dir / "configs")
         
         # Setup enhanced checkpointing
-        self._setup_enhanced_checkpointing(config_output_dir)
+        self._setup_checkpointing(config_output_dir)
         
         # Setup attention visualization if enabled
         if self.config_manager.training.enable_attention_visualization:
@@ -696,7 +696,7 @@ def parse_arguments():
     
     parser.add_argument("--config", type=Path, help="Configuration directory path")
     parser.add_argument("--model-type", choices=["donut", "trocr"], default="donut", help="Model type to train")
-    parser.add_argument("--output-dir", type=str, default="./output_enhanced", help="Output directory")
+    parser.add_argument("--output-dir", type=str, default="./output", help="Output directory")
     parser.add_argument("--data-dir", type=str, required=True, help="Data directory")
     
     # Training parameters
@@ -758,7 +758,7 @@ def main():
         elif args.resume_from:
             # Resume training from checkpoint
             logger.info(f"Resuming training from {args.resume_from}")
-            training_state = pipeline.load_enhanced_checkpoint(args.resume_from)
+            training_state = pipeline.load_checkpoint(args.resume_from)
             
             # Continue training
             training_history = pipeline.train(args.model_type, resume_from_state=training_state)
