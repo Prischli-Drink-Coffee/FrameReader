@@ -10,7 +10,7 @@
     384,
     384
   ],
-  "patch_size": 16,
+  "patch_size": 32,
   "precision": "bf16",
   "enable_gradient_checkpointing": true,
   "freeze_encoder": false,
@@ -18,7 +18,7 @@
   "task_start_token": "<s_ocr>",
   "prompt_end_token": null,
   "decoder_start_token_id": "<s_ocr>",
-  "enable_torch_compile": false,
+  "enable_torch_compile": true,
   "hf_token": null,
   "align_long_axis": false,
   "window_size": 10,
