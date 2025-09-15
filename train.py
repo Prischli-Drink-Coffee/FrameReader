@@ -299,18 +299,36 @@ class FrameReaderTrainingPipeline:
                 # Сохранение визуализации прогресса обучения
                 if hasattr(self.trainer, 'visualizer'):
                     try:
+                        # Создаем историю обучения для визуализации
                         if hasattr(self.trainer, 'history'):
+                            # Если история уже есть, используем ее
                             history = self.trainer.history
                         else:
-                            # Попытка воссоздать историю из собранных метрик
+                            # Если нет истории, создаем из метрик
                             history = {'train_loss': [], 'eval_loss': [], 'learning_rates': []}
-                            if hasattr(self.trainer, 'metrics_collector'):
-                                metrics = self.trainer.metrics_collector.get_all_metrics()
-                                if 'losses' in metrics:
-                                    history['train_loss'] = metrics['losses']
                             
-                        if hasattr(self.trainer.visualizer, 'finalize_training'):
-                            self.trainer.visualizer.finalize_training(history)
+                        # Получаем metrics_collector для построения графиков метрик
+                        metrics_collector = None
+                        if hasattr(self.trainer, 'metrics_collector'):
+                            metrics_collector = self.trainer.metrics_collector
+                        
+                        # Строим все графики
+                        if self.config_manager.training.enable_two_stage:
+                            self.trainer.visualizer.update_two_stage_progress(
+                                self.trainer.current_epoch,
+                                {'loss': self.trainer.best_metric},
+                                history,
+                                metrics_collector
+                            )
+                        else:
+                            self.trainer.visualizer.update_training_progress(
+                                self.trainer.current_epoch,
+                                {'loss': self.trainer.best_metric},
+                                history,
+                                metrics_collector
+                            )
+                        
+                        logger.info("Визуализация прогресса обучения сохранена")
                     except Exception as e:
                         logger.warning(f"Не удалось сохранить визуализацию: {e}")
                 
@@ -414,7 +432,7 @@ class FrameReaderTrainingPipeline:
     
     def run_inference_demo(self, image_path: str, model_path: Optional[str] = None) -> None:
         if self.model is None:
-            if model_path:
+            if (model_path):
                 model_type = self.config_manager.model.model_type
                 if model_type == "donut":
                     self.model = DonutOCRModel.from_pretrained(model_path)

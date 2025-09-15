@@ -398,6 +398,56 @@ class EnhancedProgressDisplay:
             self.console.print(f"🔄 [cyan]Step Info:[/cyan] {description}")
         else:
             logger.info(f"🔄 Step Info: {description}")
+    
+    def display_epoch_metrics_chart(self):
+        """Отображает график метрик по эпохам в реальном времени."""
+        if not self.use_rich or not MATPLOTLIB_AVAILABLE:
+            return
+            
+        if len(self.epoch_losses) < 2:
+            return  # Нужно минимум 2 эпохи для построения графика
+            
+        try:
+            epochs = list(range(1, len(self.epoch_losses) + 1))
+            
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+            
+            # График потерь
+            ax1.plot(epochs, self.epoch_losses, 'b-o', label='Loss', linewidth=2)
+            ax1.set_xlabel('Epoch')
+            ax1.set_ylabel('Loss')
+            ax1.set_title('Training Loss by Epoch')
+            ax1.grid(True, alpha=0.3)
+            
+            # График скорости обучения
+            if self.learning_rates:
+                ax2.plot(epochs, self.learning_rates, 'g-o', linewidth=2)
+                ax2.set_xlabel('Epoch')
+                ax2.set_ylabel('Learning Rate')
+                ax2.set_title('Learning Rate Schedule')
+                ax2.set_yscale('log')
+                ax2.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            
+            # Создаем временный файл для отображения
+            temp_filename = "temp_metrics_chart.png"
+            plt.savefig(temp_filename, dpi=100)
+            plt.close()
+            
+            # Выводим информацию о созданном графике
+            self.log_info(f"📊 Metrics chart saved to {temp_filename}")
+            
+            # Если доступен ipywidgets, можно попробовать отобразить в ноутбуке
+            try:
+                from IPython.display import display, Image
+                display(Image(filename=temp_filename))
+                self.log_info("📈 Metrics chart displayed in notebook")
+            except (ImportError, NameError):
+                self.log_info("📈 Run in Jupyter notebook to see the chart or check the file directly")
+                
+        except Exception as e:
+            self.log_warning(f"Could not display metrics chart: {e}")
 
 
 class MetricsCollector:
@@ -540,6 +590,58 @@ class MetricsCollector:
             improvement = -improvement
         
         return {'trend': trend, 'improvement': improvement}
+    
+    def get_all_metrics(self) -> Dict[str, Any]:
+        """Возвращает все собранные метрики в одном словаре для визуализации."""
+        result = {
+            'step_metrics': self.get_step_metrics_history(),
+            'epoch_metrics': self.get_epoch_metrics_history(),
+            'inference_metrics': self.get_inference_metrics_history(),
+            'best_metrics': self.get_best_metrics(),
+            'latest_metrics': self.get_latest_metrics()
+        }
+        
+        # Добавляем расчёт трендов для основных метрик
+        if self.epoch_metrics:
+            result['trends'] = {
+                'train_loss': self.calculate_metrics_trend('train_loss'),
+                'eval_loss': self.calculate_metrics_trend('eval_loss')
+            }
+            
+            # Добавляем данные для визуализации метрик по эпохам
+            result['epochs'] = [m['epoch'] for m in self.epoch_metrics]
+            result['train_losses'] = [m['train_loss'] for m in self.epoch_metrics]
+            result['eval_losses'] = [m.get('eval_loss', None) for m in self.epoch_metrics]
+            
+            # Собираем метрики инференса по эпохам для визуализации
+            epoch_to_inference = {}
+            for im in self.inference_metrics:
+                # Находим ближайшую эпоху по времени
+                timestamp = im.get('timestamp', 0)
+                epoch = next((em['epoch'] for em in self.epoch_metrics 
+                            if abs(em.get('timestamp', 0) - timestamp) < 600), None)
+                
+                if epoch is not None:
+                    if epoch not in epoch_to_inference:
+                        epoch_to_inference[epoch] = []
+                    epoch_to_inference[epoch].append({
+                        'cer': im.get('cer', None),
+                        'wer': im.get('wer', None)
+                    })
+            
+            # Вычисляем средние значения по эпохам
+            result['epoch_inference_metrics'] = {}
+            for epoch, metrics in epoch_to_inference.items():
+                if metrics:
+                    avg_cer = sum(m['cer'] for m in metrics if m['cer'] is not None) / sum(1 for m in metrics if m['cer'] is not None)
+                    avg_wer = sum(m['wer'] for m in metrics if m['wer'] is not None) / sum(1 for m in metrics if m['wer'] is not None)
+                    result['epoch_inference_metrics'][epoch] = {
+                        'avg_cer': avg_cer,
+                        'avg_wer': avg_wer,
+                        'count': len(metrics)
+                    }
+        
+        return result
 
 # Фикс проблемы с импортом time
 def import_time():

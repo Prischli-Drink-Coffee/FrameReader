@@ -49,7 +49,7 @@ class TrainingVisualizer:
             'bbox_inches': 'tight'
         }
     
-    def update_training_progress(self, epoch: int, metrics: Dict[str, Any], history: Dict[str, List]) -> None:
+    def update_training_progress(self, epoch: int, metrics: Dict[str, Any], history: Dict[str, List], metrics_collector=None) -> None:
         self.metrics_history.append({
             'epoch': epoch,
             'metrics': metrics.copy(),
@@ -58,11 +58,19 @@ class TrainingVisualizer:
         
         if epoch % max(1, self.config.num_epochs // 10) == 0 or epoch == self.config.num_epochs - 1:
             if MATPLOTLIB_AVAILABLE:
+                # Строим графики обучения
                 self._plot_training_curves(history)
+                
+                # Строим график валидационных метрик на каждой эпохе
+                self._plot_validation_metrics(history)
+                
+                # Строим график метрик по эпохам если metrics_collector доступен
+                if metrics_collector is not None:
+                    self._plot_metrics_by_epoch(metrics_collector)
             else:
                 logger.info(f"Epoch {epoch}: Training progress (visualization disabled)")
     
-    def update_two_stage_progress(self, epoch: int, metrics: Dict[str, Any], history: Dict[str, List]) -> None:
+    def update_two_stage_progress(self, epoch: int, metrics: Dict[str, Any], history: Dict[str, List], metrics_collector=None) -> None:
         stage = metrics.get('stage', 'unknown')
         
         self.metrics_history.append({
@@ -75,7 +83,17 @@ class TrainingVisualizer:
         
         if epoch % max(1, self.config.num_epochs // 10) == 0 or epoch == self.config.num_epochs - 1:
             if MATPLOTLIB_AVAILABLE:
+                # Строим график двухстадийного обучения
                 self._plot_two_stage_curves(history)
+                
+                # Строим график валидационных метрик на каждой эпохе
+                self._plot_validation_metrics(history)
+                
+                # Строим график метрик по эпохам если metrics_collector доступен
+                if metrics_collector is not None:
+                    self._plot_metrics_by_epoch(metrics_collector)
+            else:
+                logger.info(f"Epoch {epoch}: Two-stage progress (visualization disabled)")
     
     def _plot_training_curves(self, history: Dict[str, List]) -> None:
         if not MATPLOTLIB_AVAILABLE:
@@ -307,14 +325,24 @@ class TrainingVisualizer:
         
         return Image.fromarray(plot_image)
     
-    def finalize_training(self, history: Dict[str, List]) -> None:
+    def finalize_training(self, history: Dict[str, List], metrics_collector=None) -> None:
         if MATPLOTLIB_AVAILABLE:
-            self._create_training_summary(history)
+            # self._create_training_summary(history)
+            # Строим график метрик по эпохам
+            # if metrics_collector is not None:
+            #     self._plot_metrics_by_epoch(metrics_collector)
+            # Строим график валидационных метрик
+            self._plot_validation_metrics(history)
         logger.info(f"Training visualizations saved to {self.plots_dir}")
     
-    def finalize_two_stage_training(self, history: Dict[str, List]) -> None:
+    def finalize_two_stage_training(self, history: Dict[str, List], metrics_collector=None) -> None:
         if MATPLOTLIB_AVAILABLE:
-            self._create_two_stage_summary(history)
+            # self._create_two_stage_summary(history)
+            # Строим график метрик по эпохам
+            # if metrics_collector is not None:
+            #     self._plot_metrics_by_epoch(metrics_collector)
+            # Строим график валидационных метрик
+            self._plot_validation_metrics(history)
         logger.info(f"Two-stage training visualizations saved to {self.plots_dir}")
     
     def _create_training_summary(self, history: Dict[str, List]) -> None:
@@ -436,6 +464,286 @@ Real Stage: {real_epochs_count} epochs"""
         plt.tight_layout()
         plt.savefig(
             self.plots_dir / "two_stage_training_summary.png",
+            dpi=self.plot_config['dpi'],
+            bbox_inches=self.plot_config['bbox_inches']
+        )
+        plt.close()
+    
+    def _plot_metrics_by_epoch(self, metrics_collector=None):
+        """Plot all available metrics by epoch."""
+        if not MATPLOTLIB_AVAILABLE or metrics_collector is None:
+            return
+
+        # Получение всех метрик с помощью нового метода get_all_metrics
+        all_metrics = metrics_collector.get_all_metrics()
+        
+        # Проверка наличия метрик для графика
+        if not all_metrics.get('epoch_metrics'):
+            logger.warning("No epoch metrics available for plotting")
+            return
+            
+        # Подготавливаем данные для графика из структуры all_metrics
+        epochs = all_metrics.get('epochs', [])
+        train_losses = all_metrics.get('train_losses', [])
+        eval_losses = all_metrics.get('eval_losses', [])
+        
+        # Удаление None значений из eval_losses
+        eval_epochs = [e for e, v in zip(epochs, eval_losses) if v is not None]
+        clean_eval_losses = [v for v in eval_losses if v is not None]
+        
+        # Создаем график с несколькими осями
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        
+        # График 1: Потери при обучении и валидации
+        ax1 = axes[0, 0]
+        ax1.plot(epochs, train_losses, 'b-o', label='Training Loss', linewidth=2)
+        if clean_eval_losses:
+            ax1.plot(eval_epochs, clean_eval_losses, 'r-o', label='Validation Loss', linewidth=2)
+        ax1.set_xlabel('Epoch')
+        ax1.set_ylabel('Loss')
+        ax1.set_title('Training and Validation Loss by Epoch')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # График 2: Метрики CER и WER (если доступны)
+        ax2 = axes[0, 1]
+        
+        epoch_inference_metrics = all_metrics.get('epoch_inference_metrics', {})
+        if epoch_inference_metrics:
+            # Получаем данные для графика CER и WER
+            infer_epochs = sorted(epoch_inference_metrics.keys())
+            avg_cers = [epoch_inference_metrics[e]['avg_cer'] for e in infer_epochs 
+                      if 'avg_cer' in epoch_inference_metrics[e]]
+            avg_wers = [epoch_inference_metrics[e]['avg_wer'] for e in infer_epochs 
+                      if 'avg_wer' in epoch_inference_metrics[e]]
+            
+            if avg_cers:
+                ax2.plot(infer_epochs, avg_cers, 'g-o', label='CER', linewidth=2)
+            if avg_wers:
+                ax2.plot(infer_epochs, avg_wers, 'm-o', label='WER', linewidth=2)
+                
+            ax2.set_xlabel('Epoch')
+            ax2.set_ylabel('Error Rate')
+            ax2.set_title('Character and Word Error Rates by Epoch')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+        else:
+            ax2.text(0.5, 0.5, 'No inference metrics available', 
+                   horizontalalignment='center', verticalalignment='center')
+            ax2.set_title('Inference Metrics')
+        
+        # График 3: Скорость обучения по эпохам (если доступна)
+        ax3 = axes[1, 0]
+        
+        # Получаем скорость обучения из метрик шагов
+        step_metrics = all_metrics.get('step_metrics', [])
+        if step_metrics:
+            # Группируем метрики шагов по эпохам, беря среднее значение LR для каждой эпохи
+            epoch_to_lr = {}
+            for sm in step_metrics:
+                epoch = sm.get('epoch')
+                if epoch is not None:
+                    if epoch not in epoch_to_lr:
+                        epoch_to_lr[epoch] = []
+                    lr = sm.get('learning_rate')
+                    if lr is not None:
+                        epoch_to_lr[epoch].append(lr)
+            
+            lr_epochs = sorted(epoch_to_lr.keys())
+            avg_lrs = [sum(epoch_to_lr[e])/len(epoch_to_lr[e]) for e in lr_epochs if epoch_to_lr[e]]
+            
+            if avg_lrs:
+                ax3.plot(lr_epochs, avg_lrs, 'c-o', linewidth=2)
+                ax3.set_xlabel('Epoch')
+                ax3.set_ylabel('Learning Rate')
+                ax3.set_title('Learning Rate Schedule')
+                ax3.set_yscale('log')
+                ax3.grid(True, alpha=0.3)
+            else:
+                ax3.text(0.5, 0.5, 'No learning rate data available', 
+                       horizontalalignment='center', verticalalignment='center')
+                ax3.set_title('Learning Rate')
+        else:
+            ax3.text(0.5, 0.5, 'No step metrics available', 
+                   horizontalalignment='center', verticalalignment='center')
+            ax3.set_title('Learning Rate')
+            
+        # График 4: Сводная информация
+        ax4 = axes[1, 1]
+        best_metrics = all_metrics.get('best_metrics', {})
+        
+        summary_text = "Training Summary:\n\n"
+        if 'best_loss' in best_metrics:
+            summary_text += f"Best Loss: {best_metrics['best_loss']:.4f} (Epoch {best_metrics.get('best_epoch', '?')})\n"
+        if 'best_cer' in best_metrics:
+            summary_text += f"Best CER: {best_metrics['best_cer']:.4f}\n"
+        if 'best_wer' in best_metrics:
+            summary_text += f"Best WER: {best_metrics['best_wer']:.4f}\n"
+        
+        if train_losses:
+            summary_text += f"\nInitial Loss: {train_losses[0]:.4f}\n"
+            summary_text += f"Final Loss: {train_losses[-1]:.4f}\n"
+            summary_text += f"Improvement: {train_losses[0] - train_losses[-1]:.4f} ({(train_losses[0] - train_losses[-1]) / train_losses[0] * 100:.1f}%)\n"
+            
+        ax4.text(0.1, 0.5, summary_text, verticalalignment='center')
+        ax4.axis('off')
+        
+        plt.tight_layout()
+        plt.savefig(
+            self.plots_dir / "metrics_by_epoch.png",
+            dpi=self.plot_config['dpi'],
+            bbox_inches=self.plot_config['bbox_inches']
+        )
+        plt.close()
+    
+    def _plot_validation_metrics(self, history: Dict[str, List]) -> None:
+        """Plot validation metrics over epochs."""
+        if not MATPLOTLIB_AVAILABLE:
+            return
+            
+        if 'eval_loss' not in history or not history['eval_loss']:
+            logger.warning("No validation metrics available for plotting")
+            return
+            
+        # Получаем данные метрик
+        eval_losses = history.get('eval_loss', [])
+        exact_match = history.get('exact_match', [])
+        cer = history.get('cer', [])
+        wer = history.get('wer', [])
+        bleu = history.get('bleu', [])
+        rouge_l = history.get('rouge_l', [])
+        sequence_accuracy = history.get('sequence_accuracy', [])
+        
+        # Логируем доступные метрики для отладки
+        logger.info(f"Available metrics for plotting: {', '.join([k for k, v in history.items() if v])}")
+        logger.info(f"CER data available: {len(cer)}, WER data available: {len(wer)}")
+        
+        # Другие валидационные метрики
+        extra_metrics = {}
+        for key, value in history.items():
+            if key not in ['eval_loss', 'train_loss', 'learning_rates', 'stage_info', 
+                         'exact_match', 'cer', 'wer', 'bleu', 'rouge_l', 'sequence_accuracy'] and value:
+                extra_metrics[key] = value
+        
+        # Список всех доступных метрик, исключая eval_loss
+        metrics_data = {
+            'exact_match': exact_match,
+            'cer': cer,
+            'wer': wer,
+            'bleu': bleu,
+            'rouge_l': rouge_l,
+            'sequence_accuracy': sequence_accuracy
+        }
+        
+        # Добавляем дополнительные метрики
+        metrics_data.update(extra_metrics)
+        
+        # Отфильтровываем пустые метрики
+        valid_metrics = {k: v for k, v in metrics_data.items() if v}
+        
+        if not valid_metrics:
+            logger.warning("No validation metrics data available")
+            return
+            
+        # Определяем количество эпох
+        epochs = list(range(len(eval_losses)))
+        
+        # Создаем несколько графиков для разных групп метрик, чтобы избежать наложения
+        fig, axes = plt.subplots(2, 1, figsize=(12, 12))
+        
+        # Цвета для графиков
+        colors = {
+            'exact_match': 'blue',
+            'cer': 'green',
+            'wer': 'purple',
+            'bleu': 'orange',
+            'rouge_l': 'brown',
+            'sequence_accuracy': 'cyan'
+        }
+        
+        # Группа 1: Метрики точности
+        accuracy_metrics = {k: v for k, v in valid_metrics.items() 
+                         if k in ['exact_match', 'sequence_accuracy', 'bleu', 'rouge_l']}
+        
+        # Построение графиков точности на верхнем графике
+        for metric_name, metric_values in accuracy_metrics.items():
+            display_name = {
+                'exact_match': 'Exact Match',
+                'sequence_accuracy': 'Sequence Accuracy',
+                'bleu': 'BLEU Score',
+                'rouge_l': 'ROUGE-L Score'
+            }.get(metric_name, metric_name)
+            
+            axes[0].plot(
+                epochs, 
+                metric_values, 
+                '-o', 
+                label=display_name,
+                color=colors.get(metric_name, 'blue'),
+                linewidth=2,
+                markersize=5
+            )
+        
+        axes[0].set_xlabel('Epoch')
+        axes[0].set_ylabel('Accuracy Value')
+        axes[0].set_title('Validation Accuracy Metrics')
+        axes[0].legend(loc='best')
+        axes[0].grid(True, alpha=0.3)
+        axes[0].set_ylim(0, 1.0)
+        
+        # Группа 2: Метрики ошибок (CER, WER и др.)
+        # Принудительно включаем CER и WER если они есть в истории
+        error_metrics = {}
+        if 'cer' in history and history['cer']:
+            error_metrics['cer'] = history['cer']
+        if 'wer' in history and history['wer']:
+            error_metrics['wer'] = history['wer']
+            
+        # Добавляем другие метрики ошибок
+        for k, v in valid_metrics.items():
+            if k.lower().find('error') >= 0 and k not in ['cer', 'wer']:
+                error_metrics[k] = v
+                
+        logger.info(f"Error metrics for plotting: {', '.join(error_metrics.keys())}")
+        
+        # Построение графиков ошибок на нижнем графике
+        if error_metrics:
+            for metric_name, metric_values in error_metrics.items():
+                display_name = {
+                    'cer': 'Character Error Rate (CER)',
+                    'wer': 'Word Error Rate (WER)'
+                }.get(metric_name, metric_name)
+                
+                axes[1].plot(
+                    epochs, 
+                    metric_values, 
+                    '-o', 
+                    label=display_name,
+                    color=colors.get(metric_name, 'gray'),
+                    linewidth=2,
+                    markersize=5
+                )
+            
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('Error Rate')
+            axes[1].set_title('Validation Error Metrics')
+            axes[1].legend(loc='best')
+            axes[1].grid(True, alpha=0.3)
+            axes[1].set_ylim(0, 1.1)  # Увеличиваем до 1.1 чтобы точки со значением 1.0 были хорошо видны
+        else:
+            # Если метрик ошибок нет, выводим информационное сообщение
+            axes[1].text(0.5, 0.5, 'No error metrics available', 
+                       horizontalalignment='center', 
+                       verticalalignment='center',
+                       transform=axes[1].transAxes)
+            axes[1].set_title('Validation Error Metrics')
+            axes[1].axis('on')
+            axes[1].set_xlabel('Epoch')
+            axes[1].set_ylabel('Error Rate')
+        
+        plt.tight_layout()
+        plt.savefig(
+            self.plots_dir / "validation_metrics.png",
             dpi=self.plot_config['dpi'],
             bbox_inches=self.plot_config['bbox_inches']
         )

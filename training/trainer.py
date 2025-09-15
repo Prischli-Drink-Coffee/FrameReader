@@ -82,6 +82,10 @@ class BaseTrainer(ABC):
         
         history = {'train_loss': [], 'eval_loss': [], 'learning_rates': []}
         
+        # Инициализируем self.history для хранения всех метрик
+        if not hasattr(self, 'history'):
+            self.history = {}
+        
         self.progress_display.start_training()
         self.progress_display.log_info(f"Total steps: {total_steps}")
         self.progress_display.log_info(f"Output directory: {self.output_dir}")
@@ -104,6 +108,14 @@ class BaseTrainer(ABC):
             history['train_loss'].append(train_metrics['loss'])
             history['learning_rates'].append(self.optimizer.param_groups[0]['lr'])
             
+            if 'train_loss' not in self.history:
+                self.history['train_loss'] = []
+            self.history['train_loss'].append(train_metrics['loss'])
+                
+            if 'learning_rates' not in self.history:
+                self.history['learning_rates'] = []
+            self.history['learning_rates'].append(self.optimizer.param_groups[0]['lr'])
+            
             eval_metrics = None
             if eval_dataloader and epoch % self.train_config.eval_interval == 0:
                 eval_start_time = time.time()
@@ -121,7 +133,12 @@ class BaseTrainer(ABC):
                 self._save_checkpoint(f'checkpoint-epoch-{epoch}')
             
             try:
-                self.visualizer.update_training_progress(epoch, train_metrics, history)
+                # Добавляем все метрики из self.history в history перед вызовом visualizer
+                for key, value in self.history.items():
+                    if key not in history and value:
+                        history[key] = value
+                
+                self.visualizer.update_training_progress(epoch, train_metrics, history, self.metrics_collector)
             except Exception as e:
                 self.progress_display.log_warning(f"Visualization update failed: {e}")
             
@@ -143,6 +160,14 @@ class BaseTrainer(ABC):
         
         self._save_checkpoint('final_model')
         try:
+            # Копируем все метрики из self.history в history перед финальным вызовом visualizer
+            for key, value in self.history.items():
+                if key not in history and value:
+                    history[key] = value
+                    
+            logger.info(f"Final history metrics available: {', '.join(history.keys())}")
+            logger.info(f"cer data points: {len(history.get('cer', []))}, wer data points: {len(history.get('wer', []))}")
+            
             # Передаем metrics_collector при вызове finalize_training
             self.visualizer.finalize_training(history, metrics_collector=self.metrics_collector)
         except Exception as e:
@@ -194,7 +219,6 @@ class BaseTrainer(ABC):
                     
                     if batch_idx % 10 == 0 and self.inference_displayer:
                         try:
-
                             comparison = self.inference_displayer.inference_engine.compare_prediction_with_ground_truth(
                                 batch_data['pixel_values'][0], 
                                 batch['texts'][0]
@@ -232,6 +256,41 @@ class BaseTrainer(ABC):
                 self.progress_display.log_validation_summary(
                     self.current_epoch, avg_loss, detailed_metrics
                 )
+                
+                # Обновляем историю обучения валидационными метриками
+                if not hasattr(self, 'history'):
+                    self.history = {}
+                
+                # Создаём записи для eval_loss, если их ещё нет
+                if 'eval_loss' not in self.history:
+                    self.history['eval_loss'] = []
+                
+                # Заполняем пропущенные эпохи для eval_loss, если нужно
+                while len(self.history['eval_loss']) < self.current_epoch:
+                    self.history['eval_loss'].append(None)
+                
+                # Добавляем loss текущей эпохи
+                if len(self.history['eval_loss']) == self.current_epoch:
+                    self.history['eval_loss'].append(avg_loss)
+                else:
+                    self.history['eval_loss'][self.current_epoch] = avg_loss
+                
+                # Добавляем остальные метрики валидации
+                for metric_name, metric_value in detailed_metrics.items():
+                    if metric_name not in self.history:
+                        self.history[metric_name] = []
+                    
+                    # Заполняем пропущенные эпохи
+                    while len(self.history[metric_name]) < self.current_epoch:
+                        self.history[metric_name].append(None)
+                    
+                    # Добавляем метрику текущей эпохи
+                    if len(self.history[metric_name]) == self.current_epoch:
+                        self.history[metric_name].append(metric_value)
+                    else:
+                        self.history[metric_name][self.current_epoch] = metric_value
+                
+                logger.info(f"Updated training history with validation metrics: {', '.join(detailed_metrics.keys())}")
                 
             except Exception as e:
                 logger.warning(f"Error calculating validation metrics: {e}")
