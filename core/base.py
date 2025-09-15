@@ -1,9 +1,11 @@
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Tuple, Union, Any
 from pathlib import Path
-
 import torch
 import torch.nn as nn
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class BaseEncoder(ABC, nn.Module):
@@ -21,6 +23,16 @@ class BaseEncoder(ABC, nn.Module):
     @abstractmethod
     def output_dim(self) -> int:
         pass
+    
+    def freeze(self):
+        for param in self.parameters():
+            param.requires_grad = False
+        logger.info("Encoder frozen")
+    
+    def unfreeze(self):
+        for param in self.parameters():
+            param.requires_grad = True
+        logger.info("Encoder unfrozen")
 
 
 class BaseDecoder(ABC, nn.Module):
@@ -96,9 +108,7 @@ class BaseOCRModel(ABC, nn.Module):
         return [p for p in self.parameters() if p.requires_grad]
     
     def freeze_encoder(self) -> None:
-        for param in self.encoder.parameters():
-            param.requires_grad = False
+        self.encoder.freeze()
     
     def unfreeze_encoder(self) -> None:
-        for param in self.encoder.parameters():
-            param.requires_grad = True
+        self.encoder.unfreeze()

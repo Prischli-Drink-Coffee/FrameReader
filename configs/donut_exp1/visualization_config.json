@@ -1,0 +1,9 @@
+{
+  "enable_training_plots": true,
+  "enable_realtime_inference": true,
+  "enable_attention_viz": false,
+  "plot_interval": 10,
+  "save_plots": true,
+  "plot_format": "png",
+  "dpi": 300
+}

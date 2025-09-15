@@ -30,6 +30,7 @@ dependencies = [
     "sentencepiece==0.2.0",
     "tensorboard==2.19.0",
     "tensorrt==10.9.0.34",
+    "timm>=1.0.19",
     "tokenizers==0.21.1",
     "torch==2.7.0",
     "torch-tensorrt==2.7.0",
@@ -41,3 +42,8 @@ dependencies = [
 
 [tool.uv.sources]
 nvidia-modelopt = { git = "https://github.com/NVIDIA/TensorRT-Model-Optimizer.git", rev = "9c54aa1c47871d0541801a20962996461d805162" }
+
+[dependency-groups]
+dev = [
+    "flake8>=7.3.0",
+]

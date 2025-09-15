@@ -6,12 +6,15 @@ for the FrameReader OCR system.
 """
 
 from .dataset import DonutDataset, TrOCRDataset
-from .augmentations import ImageAugmentator
+from .augmentations import ImageAugmentations, AdaptiveAugmentations, TrOCRAugmentator, NoAugmentationTransform
 from .cache import ImageCache
 
 __all__ = [
    "DonutDataset",
    "TrOCRDataset", 
-   "ImageAugmentator",
+   "ImageAugmentations",
+   "AdaptiveAugmentations",
+   "TrOCRAugmentator",
+   "NoAugmentationTransform",
    "ImageCache"
 ]

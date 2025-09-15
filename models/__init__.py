@@ -3,8 +3,9 @@ Models module for FrameReader OCR system.
 Contains concrete implementations of OCR models.
 """
 
-from .donut import DonutEncoder, DonutDecoder, DonutOCRModel
+from .donut import SwinEncoder as DonutEncoder, BARTDecoder as DonutDecoder, DonutOCRModel
 from .trocr import TrOCREncoder, TrOCRDecoder, TrOCROCRModel
+from .vision_encoder_decoder import CustomVisionEncoderDecoderModel
 
 __all__ = [
     'DonutEncoder',
@@ -12,5 +13,6 @@ __all__ = [
     'DonutOCRModel',
     'TrOCREncoder',
     'TrOCRDecoder',
-    'TrOCROCRModel'
+    'TrOCROCRModel',
+    'CustomVisionEncoderDecoderModel'
 ]

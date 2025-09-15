@@ -1,0 +1,35 @@
+{
+  "model_name_or_path": null,
+  "model_type": "vision_encoder_decoder",
+  "encoder_name": "facebook/deit-base-distilled-patch16-384",
+  "decoder_name": "microsoft/DialoGPT-medium",
+  "max_length": 768,
+  "hidden_size": 768,
+  "vocab_size": 50265,
+  "image_size": [
+    384,
+    384
+  ],
+  "patch_size": 16,
+  "precision": "bf16",
+  "enable_gradient_checkpointing": true,
+  "freeze_encoder": false,
+  "flash_attention": false,
+  "task_start_token": "<s_ocr>",
+  "prompt_end_token": null,
+  "decoder_start_token_id": "<s_ocr>",
+  "enable_torch_compile": false,
+  "hf_token": null,
+  "align_long_axis": false,
+  "window_size": 10,
+  "encoder_layer": [
+    2,
+    2,
+    14,
+    2
+  ],
+  "decoder_layer": 4,
+  "max_position_embeddings": null,
+  "encoder_size": "base",
+  "projection_dim": null
+}

@@ -1,8 +1,8 @@
 import random
 import logging
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Dict, Any
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 import torchvision.transforms.functional as TF
 from torchvision import transforms
 
@@ -15,147 +15,134 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class ImageAugmentator:
-   def __init__(self, augmentation_prob: float = 0.5, max_rotation: float = 5.0,
-                brightness_range: Tuple[float, float] = (0.8, 1.2), contrast_range: Tuple[float, float] = (0.8, 1.2),
-                blur_range: Tuple[int, int] = (0, 2), noise_level: float = 0.05,
-                sharpness_range: Tuple[float, float] = (0.8, 1.5), enable_advanced: bool = True):
-       self.augmentation_prob = augmentation_prob
-       self.max_rotation = max_rotation
-       self.brightness_range = brightness_range
-       self.contrast_range = contrast_range
-       self.blur_range = blur_range
-       self.noise_level = noise_level
-       self.sharpness_range = sharpness_range
-       self.enable_advanced = enable_advanced
-       self.augmentations = []
-       
-       self._setup_augmentations()
-       
-   def _setup_augmentations(self):
-       self.augmentations = []
-       
-       self.augmentations.append(self._apply_rotation)
-       self.augmentations.append(self._apply_brightness)
-       self.augmentations.append(self._apply_contrast)
-       self.augmentations.append(self._apply_blur)
-       self.augmentations.append(self._apply_sharpness)
-       self.augmentations.append(self._apply_salt_pepper_noise)
-       
-       if self.enable_advanced:
-           self.augmentations.append(self._apply_perspective)
-           if cv2 is not None:
-               self.augmentations.append(self._apply_elastic_transform)
-           self.augmentations.append(self._apply_color_jitter)
-           self.augmentations.append(self._apply_cutout)
-       
-       logger.info(f"Setup {len(self.augmentations)} augmentation types")
-   
-   def _apply_rotation(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           angle = random.uniform(-self.max_rotation, self.max_rotation)
-           return TF.rotate(img, angle)
-       return img
-   
-   def _apply_brightness(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           brightness_factor = random.uniform(self.brightness_range[0], self.brightness_range[1])
-           return TF.adjust_brightness(img, brightness_factor)
-       return img
-   
-   def _apply_contrast(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           contrast_factor = random.uniform(self.contrast_range[0], self.contrast_range[1])
-           return TF.adjust_contrast(img, contrast_factor)
-       return img
-   
-   def _apply_blur(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob and cv2 is not None:
-           img_np = np.array(img)
-           kernel_size = random.randint(self.blur_range[0], self.blur_range[1]) * 2 + 1
-           if kernel_size > 1:
-               img_np = cv2.GaussianBlur(img_np, (kernel_size, kernel_size), 0)
-           return Image.fromarray(img_np)
-       return img
-   
-   def _apply_sharpness(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           sharpness_factor = random.uniform(self.sharpness_range[0], self.sharpness_range[1])
-           return TF.adjust_sharpness(img, sharpness_factor)
-       return img
-   
-   def _apply_salt_pepper_noise(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           img_np = np.array(img)
-           h, w, c = img_np.shape
-           salt_mask = np.random.random((h, w)) < self.noise_level/2
-           img_np[salt_mask] = 255
-           pepper_mask = np.random.random((h, w)) < self.noise_level/2
-           img_np[pepper_mask] = 0
-           return Image.fromarray(img_np)
-       return img
-   
-   def _apply_perspective(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           width, height = img.size
-           factor = 0.1
-           startpoints = [(0, 0), (width-1, 0), (width-1, height-1), (0, height-1)]
-           endpoints = []
-           
-           for point in startpoints:
-               dx = random.uniform(-factor, factor) * width
-               dy = random.uniform(-factor, factor) * height
-               endpoints.append((point[0] + dx, point[1] + dy))
-           
-           return TF.perspective(img, startpoints, endpoints, TF.InterpolationMode.BILINEAR)
-       return img
-   
-   def _apply_elastic_transform(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob and cv2 is not None:
-           img_np = np.array(img)
-           h, w, c = img_np.shape
-           alpha = random.uniform(w*0.5, w*1.5)
-           sigma = random.uniform(w*0.05, w*0.1)
-           dx = cv2.GaussianBlur(np.random.rand(h, w) * 2 - 1, (0, 0), sigma) * alpha
-           dy = cv2.GaussianBlur(np.random.rand(h, w) * 2 - 1, (0, 0), sigma) * alpha
-           x, y = np.meshgrid(np.arange(w), np.arange(h))
-           map_x = (x + dx).astype(np.float32)
-           map_y = (y + dy).astype(np.float32)
-           distorted = cv2.remap(img_np, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-           return Image.fromarray(distorted)
-       return img
-   
-   def _apply_color_jitter(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           hue_factor = random.uniform(-0.1, 0.1)
-           saturation_factor = random.uniform(0.5, 1.5)
-           
-           img = TF.adjust_hue(img, hue_factor)
-           img = TF.adjust_saturation(img, saturation_factor)
-           return img
-       return img
-   
-   def _apply_cutout(self, img: Image.Image) -> Image.Image:
-       if random.random() < self.augmentation_prob:
-           img_np = np.array(img)
-           h, w, c = img_np.shape
-           num_cutouts = random.randint(1, 3)
-           
-           for _ in range(num_cutouts):
-               cutout_width = random.randint(int(w * 0.05), int(w * 0.2))
-               cutout_height = random.randint(int(h * 0.05), int(h * 0.2))
-               x = random.randint(0, w - cutout_width)
-               y = random.randint(0, h - cutout_height)
-               color = random.randint(100, 200)
-               img_np[y:y+cutout_height, x:x+cutout_width, :] = color
-               
-           return Image.fromarray(img_np)
-       return img
-   
-   def apply(self, img: Image.Image) -> Image.Image:
-       for augmentation_fn in self.augmentations:
-           img = augmentation_fn(img)
-       return img
+class ImageAugmentations:
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        self.prob = config.get('augmentation_prob', 0.3)
+        self.max_rotation = config.get('max_rotation', 5.0)
+        self.noise_level = config.get('noise_level', 0.02)
+        self.color_jitter = config.get('color_jitter', 0.1)
+        self.elastic_transform = config.get('elastic_transform', True)
+        self.random_perspective = config.get('random_perspective', True)
+    
+    def apply_augmentations(self, image: Image.Image) -> Image.Image:
+        if not self.config.get('apply_augmentation', True):
+            return image
+        
+        if random.random() > self.prob:
+            return image
+        
+        augmented = image.copy()
+        
+        if random.random() < 0.3:
+            augmented = self._rotate(augmented)
+        
+        if random.random() < 0.2:
+            augmented = self._add_noise(augmented)
+        
+        if random.random() < 0.3:
+            augmented = self._color_jitter(augmented)
+        
+        if random.random() < 0.2:
+            augmented = self._blur(augmented)
+        
+        if random.random() < 0.1:
+            augmented = self._perspective_transform(augmented)
+        
+        return augmented
+    
+    def _rotate(self, image: Image.Image) -> Image.Image:
+        angle = random.uniform(-self.max_rotation, self.max_rotation)
+        return image.rotate(angle, expand=True, fillcolor='white')
+    
+    def _add_noise(self, image: Image.Image) -> Image.Image:
+        np_image = np.array(image)
+        noise = np.random.normal(0, self.noise_level * 255, np_image.shape)
+        noisy_image = np.clip(np_image + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(noisy_image)
+    
+    def _color_jitter(self, image: Image.Image) -> Image.Image:
+        brightness_factor = 1.0 + random.uniform(-self.color_jitter, self.color_jitter)
+        contrast_factor = 1.0 + random.uniform(-self.color_jitter, self.color_jitter)
+        saturation_factor = 1.0 + random.uniform(-self.color_jitter, self.color_jitter)
+        
+        enhancer = ImageEnhance.Brightness(image)
+        image = enhancer.enhance(brightness_factor)
+        
+        enhancer = ImageEnhance.Contrast(image)
+        image = enhancer.enhance(contrast_factor)
+        
+        enhancer = ImageEnhance.Color(image)
+        image = enhancer.enhance(saturation_factor)
+        
+        return image
+    
+    def _blur(self, image: Image.Image) -> Image.Image:
+        blur_radius = random.uniform(0.5, 1.5)
+        return image.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+    
+    def _perspective_transform(self, image: Image.Image) -> Image.Image:
+        if not self.random_perspective:
+            return image
+        
+        width, height = image.size
+        margin = min(width, height) * 0.05
+        
+        original_points = [
+            (0, 0), (width, 0), (width, height), (0, height)
+        ]
+        
+        new_points = [
+            (random.uniform(0, margin), random.uniform(0, margin)),
+            (width - random.uniform(0, margin), random.uniform(0, margin)),
+            (width - random.uniform(0, margin), height - random.uniform(0, margin)),
+            (random.uniform(0, margin), height - random.uniform(0, margin))
+        ]
+        
+        try:
+            from PIL.Image import Transform
+            return image.transform(
+                (width, height),
+                Transform.PERSPECTIVE,
+                self._get_perspective_coeffs(original_points, new_points),
+                fillcolor='white'
+            )
+        except:
+            return image
+    
+    def _get_perspective_coeffs(self, original_points, new_points):
+        matrix = []
+        for p1, p2 in zip(original_points, new_points):
+            matrix.append([p1[0], p1[1], 1, 0, 0, 0, -p2[0] * p1[0], -p2[0] * p1[1]])
+            matrix.append([0, 0, 0, p1[0], p1[1], 1, -p2[1] * p1[0], -p2[1] * p1[1]])
+        
+        A = np.array(matrix, dtype=np.float32)
+        B = np.array([p[0] for p in new_points] + [p[1] for p in new_points], dtype=np.float32)
+        
+        try:
+            coeffs = np.linalg.solve(A, B)
+            return coeffs.tolist()
+        except:
+            return [1, 0, 0, 0, 1, 0, 0, 0]
+
+
+class AdaptiveAugmentations(ImageAugmentations):
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.epoch_factor = 1.0
+        self.loss_factor = 1.0
+    
+    def update_factors(self, current_epoch: int, max_epochs: int, current_loss: float):
+        self.epoch_factor = 1.0 - (current_epoch / max_epochs) * 0.5
+        self.loss_factor = min(2.0, max(0.5, current_loss))
+    
+    def apply_augmentations(self, image: Image.Image) -> Image.Image:
+        adaptive_prob = self.prob * self.epoch_factor * self.loss_factor
+        
+        if random.random() > adaptive_prob:
+            return image
+        
+        return super().apply_augmentations(image)
 
 
 class TrOCRAugmentator:

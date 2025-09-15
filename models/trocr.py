@@ -6,278 +6,480 @@ import json
 import torch
 import torch.nn as nn
 from transformers import (
-    TrOCRProcessor,
+    TrOCRProcessor, 
     AutoModelForVision2Seq,
     AutoTokenizer,
     AutoConfig,
     AutoImageProcessor,
-    AutoModel
+    AutoModel,
+    VisionEncoderDecoderModel,
+    GPT2LMHeadModel,
+    GPT2Config
 )
+from transformers.modeling_outputs import Seq2SeqLMOutput
 
 from core.base import BaseEncoder, BaseDecoder, BaseOCRModel
 
 logger = logging.getLogger(__name__)
 
+ENCODER_MODELS = {
+    "base": "microsoft/swin-small-patch4-window7-224",
+    "large": "microsoft/swin-large-patch4-window12-384-in22k",
+    "xlarge": "microsoft/swin-large-patch4-window12-384-in22k"
+}
+
+DECODER_MODELS = {
+    "base": "ai-forever/ruRoberta-large",
+    "large": "ai-forever/ruBert-large", 
+    "xlarge": "ai-forever/ruBert-large"
+}
+
 
 class TrOCREncoder(BaseEncoder):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
+        encoder_name = config.get('encoder_name', ENCODER_MODELS['base'])
         
-        encoder_name = config.get('encoder_name', 'microsoft/swin-small-patch4-window7-224')
-        self.vision_model = AutoModel.from_pretrained(encoder_name)
-        self.hidden_size = self.vision_model.config.hidden_size
+        try:
+            self.vision_encoder = AutoModel.from_pretrained(encoder_name)
+        except Exception as e:
+            logger.warning(f"Cannot load encoder {encoder_name}: {e}, using default")
+            self.vision_encoder = AutoModel.from_pretrained(ENCODER_MODELS['base'])
+        
+        self._output_dim = getattr(self.vision_encoder.config, 'hidden_size', 768)
         
         if config.get('enable_gradient_checkpointing', False):
-            if hasattr(self.vision_model, 'gradient_checkpointing_enable'):
-                self.vision_model.gradient_checkpointing_enable()
-    
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        outputs = self.vision_model(pixel_values=pixel_values, return_dict=True)
-        return outputs.last_hidden_state
+            if hasattr(self.vision_encoder, 'gradient_checkpointing_enable'):
+                self.vision_encoder.gradient_checkpointing_enable()
+        
+        if config.get('freeze_encoder', False):
+            for param in self.vision_encoder.parameters():
+                param.requires_grad = False
     
     @property
     def output_dim(self) -> int:
-        return self.hidden_size
+        return self._output_dim
+    
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        outputs = self.vision_encoder(pixel_values=pixel_values)
+        return outputs.last_hidden_state
 
 
 class TrOCRDecoder(BaseDecoder):
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        
-        decoder_name = config.get('decoder_name', 'ai-forever/ruRoberta-large')
-        self.text_model = AutoModel.from_pretrained(decoder_name)
-        
-        self.vocab_size = getattr(self.text_model.config, 'vocab_size', 50265)
-        self.hidden_size = self.text_model.config.hidden_size
-        
-        self.text_model.config.is_decoder = True
-        self.text_model.config.add_cross_attention = True
-        
-        if config.get('enable_gradient_checkpointing', False):
-            if hasattr(self.text_model, 'gradient_checkpointing_enable'):
-                self.text_model.gradient_checkpointing_enable()
-    
-    def forward(self, encoder_hidden_states: torch.Tensor, decoder_input_ids: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None) -> torch.Tensor:
-        if decoder_input_ids is None and labels is not None:
-            decoder_input_ids = self._shift_right(labels)
+        decoder_name = config.get('decoder_name', DECODER_MODELS['base'])
         
         try:
-            decoder_outputs = self.text_model(
-                input_ids=decoder_input_ids,
-                encoder_hidden_states=encoder_hidden_states,
-                return_dict=True
-            )
-            return decoder_outputs.last_hidden_state
+            decoder_config = AutoConfig.from_pretrained(decoder_name)
+            decoder_config.is_decoder = True
+            decoder_config.add_cross_attention = True
             
+            if hasattr(decoder_config, 'use_cache'):
+                decoder_config.use_cache = not config.get('enable_gradient_checkpointing', False)
+            
+            self.text_decoder = AutoModel.from_pretrained(decoder_name, config=decoder_config)
         except Exception as e:
-            logger.error(f"Decoder forward error: {e}")
-            vocab_size = getattr(self.text_model.config, 'vocab_size', 50265)
-            if decoder_input_ids is not None and decoder_input_ids.max() >= vocab_size:
-                decoder_input_ids = torch.clamp(decoder_input_ids, min=0, max=vocab_size-1)
-                decoder_outputs = self.text_model(
-                    input_ids=decoder_input_ids,
-                    encoder_hidden_states=encoder_hidden_states,
-                    return_dict=True
-                )
-                return decoder_outputs.last_hidden_state
-            else:
-                raise
-    
-    def _shift_right(self, input_ids: torch.Tensor) -> torch.Tensor:
-        input_ids_safe = input_ids.clone()
-        shifted_input_ids = input_ids_safe.new_zeros(input_ids_safe.shape)
+            logger.warning(f"Cannot load decoder {decoder_name}: {e}, using GPT2")
+            decoder_config = GPT2Config.from_pretrained('gpt2')
+            decoder_config.is_decoder = True
+            decoder_config.add_cross_attention = True
+            self.text_decoder = GPT2LMHeadModel.from_pretrained('gpt2', config=decoder_config)
         
-        bos_token_id = self.config.get('decoder_start_token_id', 0)
-        vocab_size = getattr(self.text_model.config, 'vocab_size', 50265)
-        pad_token_id = getattr(self.text_model.config, 'pad_token_id', 1)
+        self._output_dim = getattr(self.text_decoder.config, 'hidden_size', 768)
+        self.vocab_size = getattr(self.text_decoder.config, 'vocab_size', 50257)
         
-        invalid_mask = (input_ids_safe != -100) & ((input_ids_safe < 0) | (input_ids_safe >= vocab_size))
-        if invalid_mask.any():
-            input_ids_safe = torch.where(invalid_mask, torch.tensor(pad_token_id, device=input_ids_safe.device), input_ids_safe)
-        
-        shifted_input_ids[:, 1:] = input_ids_safe[:, :-1].clone()
-        shifted_input_ids[:, 0] = bos_token_id
-        
-        if shifted_input_ids.max() >= vocab_size:
-            shifted_input_ids = torch.clamp(shifted_input_ids, min=0, max=vocab_size-1)
-        
-        return shifted_input_ids
+        if not hasattr(self.text_decoder, 'lm_head'):
+            self.lm_head = nn.Linear(self._output_dim, self.vocab_size, bias=False)
+        else:
+            self.lm_head = self.text_decoder.lm_head
     
     @property
     def output_dim(self) -> int:
-        return self.vocab_size
+        return self._output_dim
+    
+    def forward(self, encoder_hidden_states: torch.Tensor, decoder_input_ids: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None) -> Any:
+        if decoder_input_ids is None and labels is not None:
+            decoder_input_ids = labels.new_zeros(labels.shape)
+            decoder_input_ids[:, 1:] = labels[:, :-1]
+            decoder_input_ids[:, 0] = 1
+        
+        outputs = self.text_decoder(
+            input_ids=decoder_input_ids,
+            encoder_hidden_states=encoder_hidden_states,
+            use_cache=False,
+            return_dict=True
+        )
+        
+        if hasattr(outputs, 'last_hidden_state'):
+            hidden_states = outputs.last_hidden_state
+        else:
+            hidden_states = outputs[0]
+        
+        logits = self.lm_head(hidden_states)
+        
+        loss = None
+        if labels is not None:
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+            loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
+        
+        return Seq2SeqLMOutput(
+            loss=loss,
+            logits=logits,
+            past_key_values=getattr(outputs, 'past_key_values', None),
+            decoder_hidden_states=getattr(outputs, 'hidden_states', None),
+            decoder_attentions=getattr(outputs, 'attentions', None),
+            cross_attentions=getattr(outputs, 'cross_attentions', None)
+        )
 
 
 class TrOCROCRModel(BaseOCRModel):
-    def __init__(self, encoder: TrOCREncoder, decoder: TrOCRDecoder, config: Dict[str, Any]):
-        super().__init__(encoder, decoder, config)
-        
-        self.tokenizer = None
-        self.processor = None
+    def __init__(self, config: Dict[str, Any], pretrained_model_path: Optional[str] = None):
+        self.config = config
         self.max_length = config.get('max_length', 512)
-        self.precision = config.get('precision', 'bf16')
+        self.img_size = config.get('img_size', (384, 384))
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.precision = config.get('precision', 'fp32')
         
-        self.lm_head = nn.Linear(self.decoder.hidden_size, self.decoder.vocab_size, bias=False)
-        self._apply_precision_settings()
+        if pretrained_model_path:
+            self._load_from_pretrained(pretrained_model_path)
+        else:
+            self._build_custom_model(config)
+        
+        if hasattr(self, 'encoder') and hasattr(self, 'decoder'):
+            super().__init__(self.encoder, self.decoder, config)
     
-    def _apply_precision_settings(self) -> None:
-        if self.precision == "bf16" and not torch.cuda.is_bf16_supported():
-            logger.warning("BF16 not supported, falling back to FP16")
-            self.precision = "fp16"
+    def _load_from_pretrained(self, model_path: str):
+        logger.info(f"Loading TrOCR model from {model_path}")
         
-        self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(self.precision, torch.float32)
+        try:
+            self.processor = TrOCRProcessor.from_pretrained(model_path, use_fast=True)
+            self.model = AutoModelForVision2Seq.from_pretrained(model_path)
+            
+            self._configure_pretrained_model()
+            
+            self.encoder = self.model.encoder
+            self.decoder = self.model.decoder
+            self.projection = nn.Identity()
+            
+        except Exception as e:
+            logger.warning(f"Failed to load as pretrained TrOCR: {e}")
+            self._build_custom_model(self.config)
+    
+    def _build_custom_model(self, config: Dict[str, Any]):
+        encoder_name = config.get('encoder_name', None)
+        decoder_name = config.get('decoder_name', None)
+        encoder_size = config.get('encoder_size', 'base')
+        
+        if encoder_name is None:
+            encoder_name = ENCODER_MODELS.get(encoder_size, ENCODER_MODELS['base'])
+        if decoder_name is None:
+            decoder_name = DECODER_MODELS.get(encoder_size, DECODER_MODELS['base'])
+        
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(decoder_name, use_fast=True)
+            image_processor = AutoImageProcessor.from_pretrained(encoder_name)
+            self.processor = TrOCRProcessor(image_processor=image_processor, tokenizer=tokenizer)
+        except Exception as e:
+            logger.warning(f"Failed to create processor: {e}, using default")
+            self.processor = TrOCRProcessor.from_pretrained('microsoft/trocr-base-handwritten', use_fast=True)
+        
+        self._configure_tokenizer()
+        
+        encoder_config = {**config, 'encoder_name': encoder_name}
+        decoder_config = {**config, 'decoder_name': decoder_name}
+        
+        self.encoder = TrOCREncoder(encoder_config)
+        self.decoder = TrOCRDecoder(decoder_config)
+        
+        encoder_dim = self.encoder.output_dim
+        decoder_dim = self.decoder.output_dim
+        
+        if encoder_dim != decoder_dim:
+            self.projection = nn.Linear(encoder_dim, decoder_dim)
+            logger.info(f"Created projection layer: {encoder_dim} -> {decoder_dim}")
+        else:
+            self.projection = nn.Identity()
+        
+        self._build_full_model()
+    
+    def _configure_tokenizer(self):
+        tokenizer = self.processor.tokenizer
+        
+        if tokenizer.bos_token_id is None:
+            if tokenizer.pad_token_id is not None:
+                tokenizer.bos_token = tokenizer.pad_token
+                logger.info("Set bos_token to pad_token")
+            else:
+                # Добавляем базовые токены, которые должны быть в любой модели
+                tokenizer.add_special_tokens({
+                    'bos_token': '<s>',
+                    'eos_token': '</s>',
+                    'pad_token': '<pad>'
+                })
+                logger.info("Added missing special tokens")
+        
+        # Обратите внимание: дополнительное изменение размеров эмбеддингов должно 
+        # происходить после загрузки весов в методах _build_custom_model и _configure_pretrained_model
+    
+    def _configure_pretrained_model(self):
+        config = self.model.config
+        tokenizer = self.processor.tokenizer
+        
+        if not hasattr(config, 'decoder_start_token_id') or config.decoder_start_token_id is None:
+            config.decoder_start_token_id = tokenizer.bos_token_id
+        
+        config.pad_token_id = tokenizer.pad_token_id
+        config.eos_token_id = tokenizer.eos_token_id
+        config.is_encoder_decoder = True
+        
+        if self.config.get('enable_gradient_checkpointing', False):
+            if hasattr(config, 'encoder'):
+                config.encoder.use_cache = False
+            if hasattr(config, 'decoder'):
+                config.decoder.use_cache = False
+            self.model.gradient_checkpointing_enable()
+        
+        vocab_size = len(tokenizer)
+        current_size = self.model.decoder.get_input_embeddings().num_embeddings
+        if current_size != vocab_size:
+            self.model.decoder.resize_token_embeddings(vocab_size)
+    
+    def _build_full_model(self):
+        class CustomTrOCRModel(nn.Module):
+            def __init__(self, encoder, decoder, projection, config):
+                super().__init__()
+                self.encoder = encoder
+                self.decoder = decoder
+                self.projection = projection
+                self.config = config
+                
+            def forward(self, pixel_values=None, decoder_input_ids=None, labels=None, **kwargs):
+                encoder_outputs = self.encoder(pixel_values)
+                projected_outputs = self.projection(encoder_outputs)
+                
+                decoder_outputs = self.decoder(
+                    encoder_hidden_states=projected_outputs,
+                    decoder_input_ids=decoder_input_ids,
+                    labels=labels
+                )
+                
+                return decoder_outputs
+            
+            def generate(self, pixel_values, **kwargs):
+                encoder_outputs = self.encoder(pixel_values)
+                projected_outputs = self.projection(encoder_outputs)
+                
+                batch_size = pixel_values.size(0)
+                max_length = kwargs.get('max_length', 50)
+                bos_token_id = kwargs.get('decoder_start_token_id', 1)
+                eos_token_id = kwargs.get('eos_token_id', 2)
+                
+                generated_ids = torch.full(
+                    (batch_size, 1), bos_token_id, 
+                    device=pixel_values.device, dtype=torch.long
+                )
+                
+                for _ in range(max_length - 1):
+                    outputs = self.decoder(
+                        encoder_hidden_states=projected_outputs,
+                        decoder_input_ids=generated_ids
+                    )
+                    
+                    next_token_logits = outputs.logits[:, -1, :]
+                    next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                    generated_ids = torch.cat([generated_ids, next_tokens], dim=1)
+                    
+                    if (next_tokens == eos_token_id).all():
+                        break
+                
+                return generated_ids
+        
+        model_config = type('Config', (), {
+            'decoder_start_token_id': self.processor.tokenizer.bos_token_id,
+            'pad_token_id': self.processor.tokenizer.pad_token_id,
+            'eos_token_id': self.processor.tokenizer.eos_token_id,
+            'vocab_size': len(self.processor.tokenizer)
+        })()
+        
+        self.model = CustomTrOCRModel(self.encoder, self.decoder, self.projection, model_config)
     
     def forward(self, pixel_values: torch.Tensor, labels: Optional[torch.Tensor] = None) -> Dict[str, torch.Tensor]:
-        pixel_values = self._prepare_pixel_values(pixel_values)
+        pixel_values = pixel_values.to(self.device)
+        
         if labels is not None:
-            labels = self._prepare_labels(labels)
-        
-        with torch.amp.autocast(device_type=self.device.type, dtype=self.dtype, enabled=self.precision in ["bf16", "fp16"]):
-            encoder_outputs = self.encoder(pixel_values)
-            projected_features = self.projection(encoder_outputs)
-            decoder_outputs = self.decoder(encoder_hidden_states=projected_features, labels=labels)
-            logits = self.lm_head(decoder_outputs)
+            labels = labels.to(self.device)
+            if pixel_values.size(0) != labels.size(0):
+                min_batch = min(pixel_values.size(0), labels.size(0))
+                pixel_values = pixel_values[:min_batch]
+                labels = labels[:min_batch]
             
-            loss = None
-            if labels is not None:
-                loss = self._compute_loss(logits, labels)
+            vocab_size = len(self.processor.tokenizer)
+            if torch.any(labels >= vocab_size):
+                labels = torch.clamp(labels, max=vocab_size - 1)
         
-        return {'loss': loss, 'logits': logits, 'encoder_last_hidden_state': encoder_outputs}
-    
-    def _prepare_pixel_values(self, pixel_values: torch.Tensor) -> torch.Tensor:
         if pixel_values.dim() != 4:
-            logger.warning(f"Unexpected pixel_values shape: {pixel_values.shape}")
             if pixel_values.dim() == 5:
                 pixel_values = pixel_values.squeeze(1)
-        return pixel_values.to(self.device)
+        
+        if self.precision in ["bf16", "fp16"]:
+            dtype = torch.bfloat16 if self.precision == "bf16" else torch.float16
+            
+            if hasattr(torch.amp, 'autocast'):
+                with torch.amp.autocast(enabled=True, dtype=dtype, device_type=self.device.type):
+                    outputs = self.model(pixel_values=pixel_values, labels=labels)
+            else:
+                with torch.cuda.amp.autocast(enabled=True):
+                    outputs = self.model(pixel_values=pixel_values, labels=labels)
+        else:
+            outputs = self.model(pixel_values=pixel_values, labels=labels)
+        
+        if hasattr(outputs, 'loss') and outputs.loss is not None:
+            if torch.isnan(outputs.loss) or torch.isinf(outputs.loss):
+                logger.warning("Invalid loss detected, recalculating...")
+                if hasattr(outputs, 'logits') and labels is not None:
+                    loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+                    loss = loss_fct(
+                        outputs.logits.contiguous().view(-1, outputs.logits.size(-1)),
+                        labels.contiguous().view(-1)
+                    )
+                    outputs.loss = loss
+        
+        return {
+            'loss': getattr(outputs, 'loss', None),
+            'logits': getattr(outputs, 'logits', None),
+            'encoder_hidden_states': None
+        }
     
-    def _prepare_labels(self, labels: torch.Tensor) -> torch.Tensor:
-        labels = labels.to(self.device)
-        if self.tokenizer and torch.any(labels >= self.tokenizer.vocab_size):
-            labels = torch.clamp(labels, max=self.tokenizer.vocab_size - 1)
-        return labels
-    
-    def _compute_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-        
-        batch_size, seq_length = labels.shape
-        actual_vocab_size = logits.size(-1)
-        
-        if labels.shape != (batch_size, seq_length):
-            if labels.shape[1] > seq_length:
-                labels = labels[:, :seq_length]
-            elif labels.shape[1] < seq_length:
-                padding = torch.full((batch_size, seq_length - labels.shape[1]), -100, device=labels.device, dtype=labels.dtype)
-                labels = torch.cat([labels, padding], dim=1)
-        
-        logits_flat = logits.contiguous().view(-1, actual_vocab_size)
-        labels_flat = labels.contiguous().view(-1)
-        
-        if (labels_flat != -100).any() and (labels_flat >= actual_vocab_size).any():
-            invalid_mask = (labels_flat != -100) & (labels_flat >= actual_vocab_size)
-            labels_flat = torch.where(invalid_mask, torch.tensor(-100, device=labels.device), labels_flat)
-        
-        return loss_fct(logits_flat, labels_flat)
-    
-    def generate(self, pixel_values: torch.Tensor, max_length: Optional[int] = None, num_beams: int = 4, early_stopping: bool = True, **kwargs) -> List[str]:
-        if self.tokenizer is None:
-            raise ValueError("Tokenizer not initialized. Call set_tokenizer() first.")
-        
+    def generate(self, pixel_values: torch.Tensor, max_length: Optional[int] = None, num_beams: int = 4, **kwargs) -> List[str]:
         if pixel_values.dim() == 3:
             pixel_values = pixel_values.unsqueeze(0)
         
         pixel_values = pixel_values.to(self.device)
         max_length = max_length or self.max_length
         
-        try:
-            decoder_input_ids = torch.tensor([[self.tokenizer.bos_token_id]] * pixel_values.size(0)).to(self.device)
-            encoder_outputs = self.encoder(pixel_values)
-            projected_features = self.projection(encoder_outputs)
-            
-            generated_ids = self._beam_search_decode(
-                encoder_hidden_states=projected_features,
-                decoder_input_ids=decoder_input_ids,
-                max_length=max_length,
-                num_beams=num_beams,
-                **kwargs
-            )
-            
-            return self.tokenizer.batch_decode(generated_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True)
-            
-        except Exception as e:
-            logger.error(f"Generation error: {e}")
-            return [""] * pixel_values.size(0)
+        self.eval()
+        with torch.no_grad():
+            try:
+                if hasattr(self.model, 'generate') and hasattr(self.model, 'encoder'):
+                    decoder_input_ids = torch.tensor(
+                        [[self.processor.tokenizer.bos_token_id]] * pixel_values.size(0)
+                    ).to(self.device)
+                    
+                    generated_ids = self.model.generate(
+                        pixel_values=pixel_values,
+                        decoder_input_ids=decoder_input_ids,
+                        max_length=max_length,
+                        num_beams=num_beams,
+                        early_stopping=True,
+                        use_cache=True,
+                        **kwargs
+                    )
+                else:
+                    generated_ids = self.model.generate(
+                        pixel_values,
+                        max_length=max_length,
+                        decoder_start_token_id=self.processor.tokenizer.bos_token_id,
+                        eos_token_id=self.processor.tokenizer.eos_token_id,
+                        **kwargs
+                    )
+                
+                generated_text = self.processor.tokenizer.batch_decode(
+                    generated_ids,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True
+                )
+                
+                return generated_text
+                
+            except Exception as e:
+                logger.error(f"Generation failed: {e}")
+                return [""] * pixel_values.size(0)
     
-    def _beam_search_decode(self, encoder_hidden_states: torch.Tensor, decoder_input_ids: torch.Tensor, max_length: int, num_beams: int, **kwargs) -> torch.Tensor:
-        current_ids = decoder_input_ids
-        
-        for step in range(max_length - 1):
-            decoder_outputs = self.decoder(encoder_hidden_states=encoder_hidden_states, decoder_input_ids=current_ids)
-            logits = self.lm_head(decoder_outputs)
-            next_token_logits = logits[:, -1, :]
-            
-            next_token_ids = torch.argmax(next_token_logits, dim=-1, keepdim=True) if num_beams == 1 else torch.topk(next_token_logits, k=1, dim=-1)[1]
-            current_ids = torch.cat([current_ids, next_token_ids], dim=1)
-            
-            if (next_token_ids == self.tokenizer.eos_token_id).all():
-                break
-        
-        return current_ids
+    def freeze_encoder(self):
+        if hasattr(self, 'model') and hasattr(self.model, 'encoder'):
+            for param in self.model.encoder.parameters():
+                param.requires_grad = False
+        elif hasattr(self, 'encoder'):
+            for param in self.encoder.parameters():
+                param.requires_grad = False
+        logger.info("Encoder parameters frozen")
     
-    def set_tokenizer(self, tokenizer: AutoTokenizer) -> None:
-        self.tokenizer = tokenizer
+    def to_device(self, precision: str):
+        self.precision = precision
         
-        if len(tokenizer) != self.decoder.vocab_size:
-            logger.info(f"Resizing token embeddings from {self.decoder.vocab_size} to {len(tokenizer)}")
-            self.decoder.text_model.resize_token_embeddings(len(tokenizer))
-            self.lm_head = nn.Linear(self.decoder.hidden_size, len(tokenizer), bias=False)
-            self.decoder.vocab_size = len(tokenizer)
+        if precision == "bf16" and torch.cuda.is_bf16_supported():
+            dtype = torch.bfloat16
+        elif precision == "fp16":
+            dtype = torch.float16
+        else:
+            dtype = torch.float32
+        
+        if hasattr(self, 'model'):
+            self.model = self.model.to(self.device, dtype=dtype)
+        else:
+            if hasattr(self, 'encoder'):
+                self.encoder = self.encoder.to(self.device, dtype=dtype)
+            if hasattr(self, 'decoder'):
+                self.decoder = self.decoder.to(self.device, dtype=dtype)
+            if hasattr(self, 'projection'):
+                self.projection = self.projection.to(self.device, dtype=dtype)
     
-    def set_processor(self, processor: TrOCRProcessor) -> None:
-        self.processor = processor
-        if hasattr(processor, 'tokenizer'):
-            self.set_tokenizer(processor.tokenizer)
+    def get_trainable_parameters(self) -> List[torch.nn.Parameter]:
+        if hasattr(self, 'model'):
+            return [p for p in self.model.parameters() if p.requires_grad]
+        else:
+            params = []
+            for component in ['encoder', 'decoder', 'projection']:
+                if hasattr(self, component):
+                    component_obj = getattr(self, component)
+                    params.extend([p for p in component_obj.parameters() if p.requires_grad])
+            return params
+    
+    def save_pretrained(self, output_dir: Union[str, Path]):
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        if hasattr(self, 'model') and hasattr(self.model, 'save_pretrained'):
+            self.model.save_pretrained(output_dir)
+        else:
+            if hasattr(self, 'encoder'):
+                encoder_dir = output_dir / "encoder"
+                encoder_dir.mkdir(exist_ok=True)
+                torch.save(self.encoder.state_dict(), encoder_dir / "pytorch_model.bin")
+            
+            if hasattr(self, 'decoder'):
+                decoder_dir = output_dir / "decoder"
+                decoder_dir.mkdir(exist_ok=True)
+                torch.save(self.decoder.state_dict(), decoder_dir / "pytorch_model.bin")
+            
+            if hasattr(self, 'projection') and not isinstance(self.projection, nn.Identity):
+                torch.save(self.projection.state_dict(), output_dir / "projection.pt")
+            
+            model_config = {
+                "custom_model": True,
+                "encoder_dim": getattr(self.encoder, 'output_dim', 768),
+                "decoder_dim": getattr(self.decoder, 'output_dim', 768),
+                "has_projection": not isinstance(self.projection, nn.Identity),
+                "max_length": self.max_length,
+                "precision": self.precision
+            }
+            
+            with open(output_dir / "model_config.json", "w") as f:
+                json.dump(model_config, f, indent=2)
+        
+        if self.processor:
+            self.processor.save_pretrained(output_dir)
+        
+        logger.info(f"TrOCR model saved to {output_dir}")
     
     @classmethod
-    def from_pretrained(cls, model_dir: Union[str, Path], **kwargs):
+    def from_pretrained(cls, model_dir: Union[str, Path], **kwargs) -> "TrOCROCRModel":
         model_dir = Path(model_dir)
+        config = kwargs.get('config', {})
         
-        with open(model_dir / "model_config.json", "r") as f:
-            config = json.load(f)
-        
-        encoder = TrOCREncoder({**config, 'encoder_name': config.get('encoder_name')})
-        decoder = TrOCRDecoder({**config, 'decoder_name': config.get('decoder_name')})
-        model = cls(encoder, decoder, config)
-        
-        encoder.load_state_dict(torch.load(model_dir / "encoder.pt", map_location="cpu"))
-        decoder.load_state_dict(torch.load(model_dir / "decoder.pt", map_location="cpu"))
-        
-        if (model_dir / "projection.pt").exists():
-            model.projection.load_state_dict(torch.load(model_dir / "projection.pt", map_location="cpu"))
-        
-        if (model_dir / "lm_head.pt").exists():
-            model.lm_head.load_state_dict(torch.load(model_dir / "lm_head.pt", map_location="cpu"))
-        
-        try:
-            processor = TrOCRProcessor.from_pretrained(model_dir)
-            model.set_processor(processor)
-        except Exception as e:
-            logger.warning(f"Could not load processor: {e}")
-            try:
-                tokenizer = AutoTokenizer.from_pretrained(model_dir)
-                model.set_tokenizer(tokenizer)
-            except Exception as e2:
-                logger.warning(f"Could not load tokenizer: {e2}")
-        
-        return model
+        return cls(config, pretrained_model_path=str(model_dir))
     
-    def save_pretrained(self, output_dir: Union[str, Path]) -> None:
-        super().save_pretrained(output_dir)
-        
-        output_dir = Path(output_dir)
-        torch.save(self.lm_head.state_dict(), output_dir / "lm_head.pt")
-        
-        if self.processor is not None:
-            self.processor.save_pretrained(output_dir)
-        elif self.tokenizer is not None:
-            self.tokenizer.save_pretrained(output_dir)
+    @classmethod
+    def from_config(cls, config: Dict[str, Any]) -> "TrOCROCRModel":
+        return cls(config)

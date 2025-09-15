@@ -121,8 +121,13 @@ def calculate_cer(prediction: str, reference: str) -> float:
     if not prediction:
         return 1.0
 
-    distance = edit_distance(prediction, reference)
-    return distance / len(reference)
+    if NLTK_AVAILABLE:
+        distance = edit_distance(prediction, reference)
+    else:
+        # Fallback: simple character-by-character comparison
+        distance = _levenshtein_distance(prediction, reference)
+    
+    return min(distance / len(reference), 1.0)  # Ограничиваем максимум 1.0
 
 
 def calculate_wer(prediction: str, reference: str) -> float:
@@ -140,8 +145,34 @@ def calculate_wer(prediction: str, reference: str) -> float:
     if not pred_words:
         return 1.0
 
-    distance = edit_distance(pred_words, ref_words)
-    return distance / len(ref_words)
+    if NLTK_AVAILABLE:
+        distance = edit_distance(pred_words, ref_words)
+    else:
+        # Fallback: simple word-by-word comparison
+        distance = _levenshtein_distance(pred_words, ref_words)
+    
+    return min(distance / len(ref_words), 1.0)  # Ограничиваем максимум 1.0
+
+
+def _levenshtein_distance(s1, s2):
+    """Calculate Levenshtein distance between two sequences (fallback implementation)."""
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
 
 
 class RealtimeInferenceEngine:
@@ -154,11 +185,11 @@ class RealtimeInferenceEngine:
         self,
         model,
         device: Optional[Union[str, torch.device]] = None,
-        task_start_token: Optional[str] = "<s_500k>", 
+        task_start_token: Optional[str] = "<s_ocr>", 
         prompt_end_token: Optional[str] = "<s_prompt>",
-        precision: str = "fp32", 
+        precision: str = "bf16", 
         max_length: int = 64,   
-        num_beams: int = 1  # Faster inference for real-time display
+        num_beams: int = 1
     ):
         self.model = model
         self.device = device or (torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
@@ -169,7 +200,6 @@ class RealtimeInferenceEngine:
         self.task_start_token = task_start_token
         self.prompt_end_token = prompt_end_token
         
-        # Get EOS token for cleanup
         if hasattr(self.model, 'processor') and hasattr(self.model.processor, 'tokenizer'):
             tokenizer = self.model.processor.tokenizer
             self.eos_token_str_for_cleanup = getattr(tokenizer, 'eos_token', "</s>")
@@ -206,14 +236,12 @@ class RealtimeInferenceEngine:
         processor = self.model.processor
         
         try:
-            # Handle different input types
             if isinstance(image, torch.Tensor):
-                if image.dim() == 3:  # Add batch dimension
+                if image.dim() == 3:
                     pixel_values = image.unsqueeze(0).to(self.device)
                 else:
                     pixel_values = image.to(self.device)
             else:
-                # PIL Image
                 if isinstance(image, Image.Image):
                     image = image.convert("RGB")
                 pixel_values = processor(image, return_tensors="pt").pixel_values.to(self.device)
@@ -222,92 +250,94 @@ class RealtimeInferenceEngine:
             logger.error(f"Error processing image for realtime inference: {e}")
             return {"error": f"Image processing error: {e}"} if return_json else f"Error: Image processing error"
 
-        input_prompt = self.prepare_prompt(prompt)
-        
-        try:
-            decoder_input_ids = processor.tokenizer(
-                input_prompt,
-                add_special_tokens=False,
-                return_tensors="pt",
-                padding=False,
-                truncation=True,
-            )["input_ids"].to(self.device)
-        except Exception as e:
-            logger.error(f"Error tokenizing prompt for realtime inference: {e}")
-            return {"error": f"Tokenization error: {e}"} if return_json else f"Error: Tokenization error"
-
-        gen_kwargs = {
-            "no_repeat_ngram_size": 2,
-            "do_sample": False,  # Greedy decoding for speed
-            "early_stopping": True
-        }
-        
         self.model.eval()
         with torch.no_grad():
             try:
-                if self.device.type == 'cuda' and self.precision in ["fp16", "bf16"]:
-                    dtype = torch.float16 if self.precision == "fp16" else torch.bfloat16
-                    with torch.autocast(device_type=self.device.type, dtype=dtype):
-                        # Use model's generate method directly for speed
-                        if hasattr(self.model, 'generate'):
-                            model_output = self.model.generate(
-                                pixel_values,
-                                decoder_input_ids=decoder_input_ids,
-                                max_length=self.max_length, 
-                                num_beams=self.num_beams,
-                                **gen_kwargs 
-                            )
-                        else:
-                            # Fallback for custom models
-                            model_output = self.model(
-                                pixel_values=pixel_values,
-                                decoder_input_ids=decoder_input_ids
-                            ).logits.argmax(dim=-1)
+                encoder_outputs = self.model.encoder(pixel_values)
+                
+                task_start_token = self.task_start_token or "<s_ocr>"
+                if hasattr(processor.tokenizer, 'bos_token_id'):
+                    initial_token_id = processor.tokenizer.bos_token_id
                 else:
-                    if hasattr(self.model, 'generate'):
-                        model_output = self.model.generate(
-                            pixel_values,
-                            decoder_input_ids=decoder_input_ids,
-                            max_length=self.max_length,
-                            num_beams=self.num_beams,
-                            **gen_kwargs
+                    initial_tokens = processor.tokenizer(
+                        task_start_token,
+                        add_special_tokens=False,
+                        return_tensors="pt"
+                    )["input_ids"]
+                    initial_token_id = initial_tokens[0, 0].item() if initial_tokens.numel() > 0 else 0
+                
+                generated_tokens = torch.tensor([[initial_token_id]], device=self.device)
+                
+                for step in range(self.max_length - 1):
+                    try:
+                        decoder_outputs = self.model.decoder(
+                            input_ids=generated_tokens,
+                            encoder_hidden_states=encoder_outputs
                         )
-                    else:
-                        model_output = self.model(
-                            pixel_values=pixel_values,
-                            decoder_input_ids=decoder_input_ids
-                        ).logits.argmax(dim=-1)
+                        
+                        next_token_logits = decoder_outputs.logits[:, -1, :]
+                        next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                        
+                        generated_tokens = torch.cat([generated_tokens, next_token], dim=1)
+                        
+                        if hasattr(processor.tokenizer, 'eos_token_id') and next_token.item() == processor.tokenizer.eos_token_id:
+                            break
+                            
+                        if hasattr(processor.tokenizer, 'pad_token_id') and next_token.item() == processor.tokenizer.pad_token_id:
+                            break
+                            
+                    except Exception as e:
+                        logger.debug(f"Error in decode step {step}: {e}")
+                        break
+                
+                raw_text_output = processor.tokenizer.decode(
+                    generated_tokens[0], 
+                    skip_special_tokens=True
+                )
+
+                # logger.info(f"Realtime inference raw output: {raw_text_output}")
 
             except Exception as e:
                 logger.error(f"Error during model inference: {e}")
-                return {"error": f"Model inference error: {e}"} if return_json else f"Error: Model inference error"
-        
-        # Decode output
-        try:
-            if isinstance(model_output, torch.Tensor):
-                raw_text_outputs = processor.batch_decode(model_output, skip_special_tokens=False)
-                raw_text_output = raw_text_outputs[0] if raw_text_outputs else ""
-            elif isinstance(model_output, list):
-                raw_text_output = model_output[0] if model_output else ""
-            else:
-                raw_text_output = str(model_output)
+                raw_text_output = ""
 
-        except Exception as e:
-            logger.error(f"Error decoding model output: {e}")
-            return {"error": f"Decoding error: {e}"} if return_json else f"Error: Decoding error"
-
-        # Process output
         if return_json:
             try:
                 result = TextCleanup.extract_fields_from_donut_output(raw_text_output)
-                if not result and raw_text_output.strip() and raw_text_output.strip() != self.eos_token_str_for_cleanup:
+                if not result and raw_text_output.strip():
                     result = {"text_sequence": TextCleanup.cleanup_donut_output(raw_text_output)}
-                return result
+                return result or {"text_sequence": ""}
             except Exception as e:
                 logger.warning(f"Error parsing output to JSON: {e}")
-                return {"text_sequence": TextCleanup.cleanup_donut_output(raw_text_output), "parsing_error": str(e)}
+                return {"text_sequence": TextCleanup.cleanup_donut_output(raw_text_output)}
         else:
+            # logger.info(f"Realtime inference cleaned output: {TextCleanup.cleanup_donut_output(raw_text_output)}")
             return TextCleanup.cleanup_donut_output(raw_text_output)
+    
+    def _simple_greedy_decode(self, encoder_outputs, prompt_tokens, tokenizer, max_steps=20):
+        """Simple greedy decoding for real-time inference."""
+        batch_size = encoder_outputs.size(0)
+        generated_tokens = prompt_tokens.clone()
+        
+        for _ in range(max_steps):
+            try:
+                decoder_outputs = self.model.decoder(
+                    input_ids=generated_tokens,
+                    encoder_hidden_states=encoder_outputs
+                )
+                
+                next_token_logits = decoder_outputs.logits[:, -1, :]
+                next_tokens = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                generated_tokens = torch.cat([generated_tokens, next_tokens], dim=1)
+                
+                if next_tokens.item() == tokenizer.eos_token_id:
+                    break
+                    
+            except Exception as e:
+                logger.debug(f"Error in greedy decode step: {e}")
+                break
+        
+        return generated_tokens
 
     def compare_prediction_with_ground_truth(
         self,
@@ -333,8 +363,9 @@ class RealtimeInferenceEngine:
         
         prediction_str = str(prediction)
         ground_truth_str = str(ground_truth)
+
+        # logger.info(f"Prediction: '{prediction_str}' | Ground Truth: '{ground_truth_str}'")
         
-        # Calculate metrics
         cer = calculate_cer(prediction_str, ground_truth_str)
         wer = calculate_wer(prediction_str, ground_truth_str)
         
@@ -361,7 +392,6 @@ class RealtimeInferenceEngine:
         wer = comparison_result.get("wer", 1.0)
         status = comparison_result.get("status", "unknown")
         
-        # Truncate long texts for display
         max_len = 60
         pred_display = prediction[:max_len] + "..." if len(prediction) > max_len else prediction
         gt_display = ground_truth[:max_len] + "..." if len(ground_truth) > max_len else ground_truth
@@ -413,9 +443,23 @@ class TrainingInferenceDisplayer:
             return None
             
         try:
-            # Extract sample from batch
             pixel_values = batch_data.get('pixel_values', None)
             labels = batch_data.get('labels', None)
+            texts = batch_data.get('texts', None)
+            
+            logger.warning(f"Batch keys: {list(batch_data.keys())}")
+            logger.warning(f"Texts available: {texts is not None}")
+            if texts is not None:
+                logger.warning(f"Texts type: {type(texts)}, length: {len(texts)}")
+                if len(texts) > 0:
+                    text_sample = texts[0]
+                    logger.warning(f"Sample text type: {type(text_sample)}, content: '{text_sample}'")
+                    # Проверка на escape последовательности
+                    try:
+                        decoded = text_sample.encode().decode('unicode_escape')
+                        logger.warning(f"Unicode decoded: '{decoded}'")
+                    except:
+                        logger.warning(f"Failed to decode unicode escapes")
             
             if pixel_values is None:
                 logger.warning("No pixel_values found in batch for inference display")
@@ -429,22 +473,70 @@ class TrainingInferenceDisplayer:
                 
             # Get ground truth if available
             ground_truth = ""
-            if labels is not None and hasattr(self.inference_engine.model, 'processor'):
+            
+            # Сначала пробуем получить из texts (если есть)
+            if texts is not None and len(texts) > sample_idx:
+                raw_text = texts[sample_idx]
+                
+                # Обработка строки с учетом возможных escape-последовательностей
+                if isinstance(raw_text, str):
+                    try:
+                        # Пробуем декодировать unicode escape-последовательности
+                        ground_truth = raw_text.encode().decode('unicode_escape')
+                    except:
+                        ground_truth = raw_text
+                else:
+                    ground_truth = str(raw_text)
+                    
+                logger.warning(f"Got ground truth from texts: '{ground_truth}'")
+            
+            # Если texts пустые или отсутствуют, пробуем декодировать labels
+            if not ground_truth and labels is not None and hasattr(self.inference_engine.model, 'processor'):
                 try:
                     if labels.dim() == 2:  # Batch dimension exists
                         sample_labels = labels[sample_idx] if sample_idx < labels.shape[0] else labels[0]
                     else:
                         sample_labels = labels
                     
-                    # Decode labels to text
-                    # Filter out ignore_id and special tokens
-                    valid_tokens = sample_labels[sample_labels != -100]
-                    if len(valid_tokens) > 0:
-                        ground_truth = self.inference_engine.model.processor.tokenizer.decode(
-                            valid_tokens, skip_special_tokens=True
+                    # Используем более надежную логику декодирования labels
+                    pad_token_id = self.inference_engine.model.processor.tokenizer.pad_token_id
+                    ignore_idx = -100
+                    
+                    # Создаем копию для безопасности
+                    decode_tokens = sample_labels.clone()
+                    
+                    # Заменяем ignored tokens на pad tokens для корректного декодирования
+                    if pad_token_id is not None:
+                        decode_tokens[decode_tokens == ignore_idx] = pad_token_id
+                        
+                    # Декодируем только если есть хотя бы один не-pad токен
+                    valid_tokens = (decode_tokens != pad_token_id).sum().item() if pad_token_id is not None else len(decode_tokens)
+                    if valid_tokens > 0:
+                        decoded_text = self.inference_engine.model.processor.tokenizer.decode(
+                            decode_tokens, skip_special_tokens=True
                         )
+                        ground_truth = decoded_text.strip()
+                        logger.warning(f"Got ground truth from labels: '{ground_truth}'")
+                        
                 except Exception as e:
-                    logger.debug(f"Could not decode ground truth labels: {e}")
+                    logger.warning(f"Could not decode ground truth labels: {e}")
+            
+            # Если все еще пустая, проверяем другие возможные поля батча
+            if not ground_truth and isinstance(batch_data, dict):
+                for key in batch_data.keys():
+                    if key.lower().find('text') >= 0 or key.lower().find('gt') >= 0 or key.lower().find('ground') >= 0:
+                        value = batch_data[key]
+                        if isinstance(value, (list, tuple)) and len(value) > sample_idx:
+                            potential_text = value[sample_idx]
+                            if isinstance(potential_text, str) and potential_text.strip():
+                                ground_truth = potential_text.strip()
+                                logger.warning(f"Found ground truth in field '{key}': '{ground_truth}'")
+                                break
+            
+            # Если все еще пустая, используем placeholder
+            if not ground_truth:
+                ground_truth = ""
+                logger.warning("No ground truth found, using empty string")
             
             # Get prediction
             comparison = self.inference_engine.compare_prediction_with_ground_truth(
