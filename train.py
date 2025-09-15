@@ -289,37 +289,34 @@ class FrameReaderTrainingPipeline:
         if not output_dir:
             output_dir = Path(self.config_manager.training.output_dir)
         
-        emergency_dir = output_dir / "emergency_checkpoint"
-        
         try:
-            if self.model:
-                logger.info(f"Сохранение модели в экстренном режиме: {emergency_dir}")
-                emergency_dir.mkdir(parents=True, exist_ok=True)
-                self.model.save_pretrained(emergency_dir)
+            if self.model and self.trainer:
+                logger.info(f"Сохранение экстренной контрольной точки...")
                 
-                # Сохранение текущего состояния обучения, если доступен тренер
-                if self.trainer:
-                    self.trainer._save_checkpoint('emergency_checkpoint')
-                    
-                    # Сохранение визуализации прогресса обучения
-                    if hasattr(self.trainer, 'visualizer'):
-                        try:
-                            if hasattr(self.trainer, 'history'):
-                                history = self.trainer.history
-                            else:
-                                # Попытка воссоздать историю из собранных метрик
-                                history = {'train_loss': [], 'eval_loss': [], 'learning_rates': []}
-                                if hasattr(self.trainer, 'metrics_collector'):
-                                    metrics = self.trainer.metrics_collector.get_all_metrics()
-                                    if 'losses' in metrics:
-                                        history['train_loss'] = metrics['losses']
-                                
-                            if hasattr(self.trainer.visualizer, 'finalize_training'):
-                                self.trainer.visualizer.finalize_training(history)
-                        except Exception as e:
-                            logger.warning(f"Не удалось сохранить визуализацию: {e}")
+                # Используем стандартный метод сохранения из тренера
+                self.trainer._save_checkpoint('emergency_checkpoint')
                 
-                logger.info(f"Экстренная контрольная точка сохранена в {emergency_dir}")
+                # Сохранение визуализации прогресса обучения
+                if hasattr(self.trainer, 'visualizer'):
+                    try:
+                        if hasattr(self.trainer, 'history'):
+                            history = self.trainer.history
+                        else:
+                            # Попытка воссоздать историю из собранных метрик
+                            history = {'train_loss': [], 'eval_loss': [], 'learning_rates': []}
+                            if hasattr(self.trainer, 'metrics_collector'):
+                                metrics = self.trainer.metrics_collector.get_all_metrics()
+                                if 'losses' in metrics:
+                                    history['train_loss'] = metrics['losses']
+                            
+                        if hasattr(self.trainer.visualizer, 'finalize_training'):
+                            self.trainer.visualizer.finalize_training(history)
+                    except Exception as e:
+                        logger.warning(f"Не удалось сохранить визуализацию: {e}")
+                
+                logger.info(f"Экстренная контрольная точка сохранена в {output_dir / 'emergency_checkpoint'}")
+            else:
+                logger.warning("Невозможно сохранить экстренную контрольную точку: модель или тренер не инициализированы")
         except Exception as e:
             logger.error(f"Ошибка при экстренном сохранении модели: {e}")
     

@@ -1,12 +1,10 @@
 """
 Enhanced progress bar and real-time metrics display for training.
 """
-
-import time
-import logging
 from typing import Dict, List, Optional, Any
 from pathlib import Path
-import sys
+import logging
+import time
 
 try:
     from rich.console import Console
@@ -205,8 +203,6 @@ class EnhancedProgressDisplay:
             if 'avg_wer' in inference_metrics:
                 wer_status = "🎯" if inference_metrics['avg_wer'] < 0.1 else "⚠️" if inference_metrics['avg_wer'] < 0.3 else "❌"
                 table.add_row("Word Error Rate", f"{wer_status} {inference_metrics['avg_wer']:.3f}")
-            if 'count' in inference_metrics:
-                table.add_row("Inference Samples", str(inference_metrics['count']))
         
         total_time = time.time() - self.training_start_time
         if self.current_epoch > 0:
@@ -335,7 +331,7 @@ class EnhancedProgressDisplay:
             
             if self.epoch_losses:
                 summary_table.add_row("Final Loss", f"{self.epoch_losses[-1]:.6f}")
-                summary_table.add_row("Best Loss", f"{min(self.epoch_losses):.6f}")
+                summary_table.add_row("Best Loss", f"{min(self.epoch_losses)::.6f}")
                 summary_table.add_row("Loss Improvement", f"{self.epoch_losses[0] - self.epoch_losses[-1]:.6f}")
             
             if self.inference_metrics:
@@ -357,7 +353,7 @@ class EnhancedProgressDisplay:
             logger.info(f"Total time: {total_time/60:.1f}m")
             if self.epoch_losses:
                 logger.info(f"Final loss: {self.epoch_losses[-1]:.6f}")
-                logger.info(f"Best loss: {min(self.epoch_losses):.6f}")
+                logger.info(f"Best loss: {min(self.epoch_losses)::.6f}")
     
     def log_inference_result(self, result: str):
         """Log inference result during training."""
@@ -386,75 +382,166 @@ class EnhancedProgressDisplay:
             self.console.print(f"ℹ️  [blue]Info:[/blue] {message}")
         else:
             logger.info(f"ℹ️  Info: {message}")
+    
+    def log_step_info(self, step: int, global_step: int, loss: float, lr: float, 
+                inference_metrics: Optional[Dict] = None):
+        """Log step information during training."""
+        description = f"Step {global_step} (Batch {step}) | Loss: {loss:.4f}"
+        
+        if inference_metrics:
+            if 'avg_cer' in inference_metrics:
+                description += f" | CER: {inference_metrics['avg_cer']:.3f}"
+            if 'avg_wer' in inference_metrics:
+                description += f" | WER: {inference_metrics['avg_wer']:.3f}"
+                
+        if self.use_rich:
+            self.console.print(f"🔄 [cyan]Step Info:[/cyan] {description}")
+        else:
+            logger.info(f"🔄 Step Info: {description}")
 
 
 class MetricsCollector:
-    """Collects and manages training metrics for display."""
+    """Collects and stores metrics during training for visualization and analysis."""
     
     def __init__(self):
-        self.metrics_history = []
-        self.current_metrics = {}
-        
-    def update_batch_metrics(self, loss: float, lr: float, batch_time: float):
-        """Update batch-level metrics."""
-        self.current_metrics.update({
+        self.step_metrics = []
+        self.epoch_metrics = []
+        self.inference_metrics = []
+        self.best_metrics = {
+            'best_loss': float('inf'),
+            'best_cer': float('inf'),
+            'best_wer': float('inf'),
+            'best_exact_match': 0.0,
+            'best_epoch': -1
+        }
+    
+    def update_batch_metrics(self, loss: float, learning_rate: float, batch_time: float) -> None:
+        """Обновляет метрики для текущего батча."""
+        self.step_metrics.append({
             'loss': loss,
-            'learning_rate': lr,
+            'learning_rate': learning_rate,
             'batch_time': batch_time
         })
     
-    def update_inference_metrics(self, cer: float, wer: float, count: int):
-        """Update inference metrics."""
-        self.current_metrics.update({
+    def update_step_metrics(self, epoch: int, batch_idx: int, loss: float, learning_rate: float, 
+                          global_step: int, inference_metrics: Optional[Dict] = None) -> None:
+        """Обновляет метрики для текущего шага."""
+        step_data = {
+            'epoch': epoch,
+            'batch_idx': batch_idx,
+            'loss': loss,
+            'learning_rate': learning_rate,
+            'global_step': global_step,
+            'timestamp': import_time().time()
+        }
+        
+        if inference_metrics:
+            step_data.update({
+                'inference_cer': inference_metrics.get('avg_cer', None),
+                'inference_wer': inference_metrics.get('avg_wer', None),
+                'inference_count': inference_metrics.get('count', 0),
+            })
+        
+        self.step_metrics.append(step_data)
+    
+    def update_epoch_metrics(self, epoch: int, train_loss: float, 
+                           eval_loss: Optional[float] = None) -> None:
+        """Обновляет метрики для текущей эпохи."""
+        epoch_data = {
+            'epoch': epoch,
+            'train_loss': train_loss,
+        }
+        
+        if eval_loss is not None:
+            epoch_data['eval_loss'] = eval_loss
+            if eval_loss < self.best_metrics['best_loss']:
+                self.best_metrics['best_loss'] = eval_loss
+                self.best_metrics['best_epoch'] = epoch
+        
+        self.epoch_metrics.append(epoch_data)
+    
+    def update_inference_metrics(self, cer: float, wer: float, sample_count: int) -> None:
+        """Обновляет метрики инференса."""
+        inference_data = {
             'cer': cer,
             'wer': wer,
-            'inference_count': count
-        })
-    
-    def update_epoch_metrics(self, epoch: int, epoch_loss: float, eval_loss: Optional[float] = None):
-        """Update epoch-level metrics."""
-        epoch_metrics = {
-            'epoch': epoch,
-            'epoch_loss': epoch_loss,
-            'eval_loss': eval_loss,
-            'timestamp': time.time()
+            'sample_count': sample_count,
+            'timestamp': import_time().time()
         }
-        epoch_metrics.update(self.current_metrics)
         
-        self.metrics_history.append(epoch_metrics)
-        self.current_metrics = {}  # Reset for next epoch
+        # Обновляем лучшие метрики
+        if cer < self.best_metrics['best_cer']:
+            self.best_metrics['best_cer'] = cer
+        
+        if wer < self.best_metrics['best_wer']:
+            self.best_metrics['best_wer'] = wer
+        
+        self.inference_metrics.append(inference_data)
     
-    def get_recent_metrics(self, n: int = 5) -> Dict:
-        """Get average of recent metrics."""
-        if len(self.metrics_history) < n:
-            recent = self.metrics_history
-        else:
-            recent = self.metrics_history[-n:]
-        
-        if not recent:
-            return {}
-        
-        avg_metrics = {}
-        for key in ['epoch_loss', 'cer', 'wer']:
-            values = [m.get(key) for m in recent if m.get(key) is not None]
-            if values:
-                avg_metrics[f'avg_{key}'] = sum(values) / len(values)
-        
-        avg_metrics['count'] = len([m for m in recent if m.get('cer') is not None])
-        
-        return avg_metrics
+    def get_step_metrics_history(self) -> List[Dict]:
+        """Возвращает историю метрик по шагам."""
+        return self.step_metrics
     
-    def get_best_metrics(self) -> Dict:
-        """Get best metrics achieved."""
-        if not self.metrics_history:
-            return {}
+    def get_epoch_metrics_history(self) -> List[Dict]:
+        """Возвращает историю метрик по эпохам."""
+        return self.epoch_metrics
+    
+    def get_inference_metrics_history(self) -> List[Dict]:
+        """Возвращает историю метрик инференса."""
+        return self.inference_metrics
+    
+    def get_best_metrics(self) -> Dict[str, float]:
+        """Возвращает лучшие метрики за все обучение."""
+        return self.best_metrics
+    
+    def get_latest_metrics(self) -> Dict[str, Any]:
+        """Возвращает последние метрики."""
+        result = {}
         
-        best_loss = min(m['epoch_loss'] for m in self.metrics_history)
-        best_cer = min(m.get('cer', float('inf')) for m in self.metrics_history if m.get('cer') is not None)
-        best_wer = min(m.get('wer', float('inf')) for m in self.metrics_history if m.get('wer') is not None)
+        if self.epoch_metrics:
+            result.update(self.epoch_metrics[-1])
+            
+        if self.inference_metrics:
+            latest_inference = self.inference_metrics[-1]
+            result.update({
+                'latest_cer': latest_inference['cer'],
+                'latest_wer': latest_inference['wer']
+            })
         
-        return {
-            'best_loss': best_loss,
-            'best_cer': best_cer if best_cer != float('inf') else None,
-            'best_wer': best_wer if best_wer != float('inf') else None
-        }
+        return result
+    
+    def calculate_metrics_trend(self, metric_name: str, window_size: int = 5) -> Dict[str, float]:
+        """Рассчитывает тренд для указанной метрики на основе последних значений."""
+        if not self.epoch_metrics:
+            return {'trend': 0.0, 'improvement': 0.0}
+        
+        values = []
+        for metric in self.epoch_metrics:
+            if metric_name in metric:
+                values.append(metric[metric_name])
+        
+        if len(values) < 2:
+            return {'trend': 0.0, 'improvement': 0.0}
+        
+        window = values[-min(window_size, len(values)):]
+        
+        if len(window) < 2:
+            return {'trend': 0.0, 'improvement': 0.0}
+            
+        # Линейный тренд (положительный = ухудшение для loss, cer, wer)
+        trend = (window[-1] - window[0]) / len(window)
+        
+        # Общее улучшение от начала обучения
+        improvement = values[0] - values[-1]
+        
+        # Для метрик, где больше = лучше (accuracy, f1), инвертируем знак
+        if metric_name in ['exact_match', 'accuracy', 'f1', 'precision', 'recall', 'bleu', 'rouge_l']:
+            trend = -trend
+            improvement = -improvement
+        
+        return {'trend': trend, 'improvement': improvement}
+
+# Фикс проблемы с импортом time
+def import_time():
+    import time
+    return time

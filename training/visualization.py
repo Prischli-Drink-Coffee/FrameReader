@@ -49,219 +49,6 @@ class TrainingVisualizer:
             'bbox_inches': 'tight'
         }
     
-    def _plot_performance_analysis(self, history: Dict[str, List]) -> None:
-        """
-        Создает график с анализом производительности модели, включая скорость обучения,
-        динамику метрик и эффективность обучения
-        """
-        if not MATPLOTLIB_AVAILABLE or not self.metrics_history:
-            return
-            
-        # Собираем данные о производительности из истории метрик
-        epochs = [m['epoch'] for m in self.metrics_history]
-        
-        # Собираем значения метрик
-        loss_values = [m['metrics'].get('loss', None) for m in self.metrics_history]
-        loss_values = [v for v in loss_values if v is not None]
-        
-        # Собираем метрики производительности OCR, если они есть
-        cer_values = [m['metrics'].get('cer', None) for m in self.metrics_history if 'cer' in m['metrics']]
-        wer_values = [m['metrics'].get('wer', None) for m in self.metrics_history if 'wer' in m['metrics']]
-        
-        # Создаем фигуру
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        axes = axes.flatten()
-        
-        # График 1: Скорость улучшения лосса
-        if len(loss_values) > 1:
-            loss_improvements = [loss_values[i-1] - loss_values[i] for i in range(1, len(loss_values))]
-            epochs_imp = epochs[1:]
-            
-            # Скользящее среднее для сглаживания
-            if len(loss_improvements) > 5:
-                window_size = min(5, len(loss_improvements) // 3)
-                smoothed_improvements = self._moving_average(loss_improvements, window_size)
-                
-                axes[0].plot(epochs_imp, loss_improvements, 'o-', alpha=0.5, label='Per Epoch')
-                axes[0].plot(epochs_imp, smoothed_improvements, 'r-', linewidth=2, 
-                          label=f'Smoothed (w={window_size})')
-                
-                # Маркируем точки с наибольшим улучшением
-                best_idx = smoothed_improvements.index(max(smoothed_improvements))
-                axes[0].annotate(f'Best: {smoothed_improvements[best_idx]:.4f}',
-                              xy=(epochs_imp[best_idx], smoothed_improvements[best_idx]),
-                              xytext=(epochs_imp[best_idx] + 1, smoothed_improvements[best_idx]),
-                              arrowprops=dict(facecolor='black', shrink=0.05, width=1))
-            else:
-                axes[0].plot(epochs_imp, loss_improvements, 'o-', label='Per Epoch')
-                
-            axes[0].axhline(y=0, color='gray', linestyle='--', alpha=0.7)
-            axes[0].set_xlabel('Epoch')
-            axes[0].set_ylabel('Loss Improvement')
-            axes[0].set_title('Training Speed (Loss Improvement per Epoch)')
-            axes[0].legend()
-            axes[0].grid(True, alpha=0.3)
-            
-            # Добавляем аннотацию с информацией об улучшении
-            total_improvement = loss_values[0] - loss_values[-1]
-            avg_improvement = total_improvement / (len(loss_values) - 1)
-            
-            info_text = f"Total improvement: {total_improvement:.4f}\n"
-            info_text += f"Avg per epoch: {avg_improvement:.4f}"
-            
-            axes[0].annotate(info_text, xy=(0.02, 0.02), xycoords='axes fraction',
-                          bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
-                          va='bottom', ha='left')
-            
-        else:
-            axes[0].text(0.5, 0.5, 'Not enough data for improvement analysis',
-                      transform=axes[0].transAxes, ha='center', va='center')
-            axes[0].set_xticks([])
-            axes[0].set_yticks([])
-        
-        # График 2: Сравнение метрик CER и WER, если они есть
-        if cer_values and wer_values:
-            min_len = min(len(cer_values), len(wer_values))
-            cer_epochs = epochs[:min_len]
-            
-            # Нормализуем значения для сравнения на одном графике
-            max_cer = max(cer_values[:min_len])
-            max_wer = max(wer_values[:min_len])
-            norm_cer = [v / max_cer for v in cer_values[:min_len]]
-            norm_wer = [v / max_wer for v in wer_values[:min_len]]
-            
-            axes[1].plot(cer_epochs, norm_cer, 'b-', label=f'CER (max={max_cer:.4f})')
-            axes[1].plot(cer_epochs, norm_wer, 'g-', label=f'WER (max={max_wer:.4f})')
-            
-            axes[1].set_xlabel('Epoch')
-            axes[1].set_ylabel('Normalized Value')
-            axes[1].set_title('CER/WER Comparison (Normalized)')
-            axes[1].legend()
-            axes[1].grid(True, alpha=0.3)
-            
-            # Коэффициент корреляции
-            from scipy.stats import pearsonr
-            try:
-                corr, _ = pearsonr(cer_values[:min_len], wer_values[:min_len])
-                axes[1].annotate(f"Correlation: {corr:.3f}", xy=(0.02, 0.02), xycoords='axes fraction',
-                              bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
-                              va='bottom', ha='left')
-            except:
-                pass
-        elif len(loss_values) > 3:
-            # Если нет CER/WER, но есть лосс, показываем скорость сходимости
-            convergence_data = []
-            
-            # Определяем процентное улучшение от начального лосса
-            initial_loss = loss_values[0]
-            for i, loss in enumerate(loss_values):
-                improvement_pct = (initial_loss - loss) / initial_loss * 100
-                convergence_data.append(improvement_pct)
-            
-            axes[1].plot(epochs, convergence_data, 'purple', linewidth=2)
-            axes[1].set_xlabel('Epoch')
-            axes[1].set_ylabel('Improvement (%)')
-            axes[1].set_title('Convergence Speed (% Improvement)')
-            axes[1].grid(True, alpha=0.3)
-            
-            # Добавляем целевые линии
-            for target in [25, 50, 75]:
-                axes[1].axhline(y=target, color='gray', linestyle='--', alpha=0.5)
-                axes[1].annotate(f"{target}%", xy=(-0.5, target), textcoords="offset points",
-                              xytext=(-15, 0), ha='right')
-        else:
-            axes[1].text(0.5, 0.5, 'Not enough OCR metric data',
-                      transform=axes[1].transAxes, ha='center', va='center')
-            axes[1].set_xticks([])
-            axes[1].set_yticks([])
-        
-        # График 3: Анализ стабильности обучения
-        if len(loss_values) > 3:
-            # Рассчитываем волатильность (изменение лосса между соседними эпохами)
-            volatility = [abs(loss_values[i] - loss_values[i-1]) for i in range(1, len(loss_values))]
-            epochs_vol = epochs[1:]
-            
-            # Скользящее среднее для сглаживания
-            if len(volatility) > 5:
-                window_size = min(5, len(volatility) // 3)
-                smoothed_vol = self._moving_average(volatility, window_size)
-                
-                # Двойная шкала: волатильность и тренд лосса
-                ax3a = axes[2]
-                ax3b = ax3a.twinx()
-                
-                # Волатильность на основной шкале
-                ax3a.bar(epochs_vol, volatility, alpha=0.3, color='gray', label='Volatility')
-                ax3a.plot(epochs_vol, smoothed_vol, 'r-', linewidth=2, label=f'Smoothed (w={window_size})')
-                
-                # Тренд лосса на вторичной шкале
-                ax3b.plot(epochs, loss_values, 'b--', alpha=0.7, label='Loss')
-                
-                ax3a.set_xlabel('Epoch')
-                ax3a.set_ylabel('Loss Change (Volatility)')
-                ax3b.set_ylabel('Loss Value')
-                ax3a.set_title('Training Stability Analysis')
-                
-                # Объединяем легенды
-                lines1, labels1 = ax3a.get_legend_handles_labels()
-                lines2, labels2 = ax3b.get_legend_handles_labels()
-                ax3a.legend(lines1 + lines2, labels1 + labels2, loc='upper right')
-                
-                ax3a.grid(True, alpha=0.3)
-                
-                # Аннотация со средней волатильностью
-                avg_volatility = sum(volatility) / len(volatility)
-                ax3a.annotate(f"Avg volatility: {avg_volatility:.4f}", xy=(0.02, 0.02),
-                           xycoords='axes fraction', va='bottom', ha='left',
-                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
-            else:
-                axes[2].bar(epochs_vol, volatility, color='gray')
-                axes[2].set_xlabel('Epoch')
-                axes[2].set_ylabel('Loss Change (Volatility)')
-                axes[2].set_title('Training Stability')
-                axes[2].grid(True, alpha=0.3)
-        else:
-            axes[2].text(0.5, 0.5, 'Not enough data for stability analysis',
-                      transform=axes[2].transAxes, ha='center', va='center')
-            axes[2].set_xticks([])
-            axes[2].set_yticks([])
-        
-        # График 4: Статистика распределения лосса
-        if len(loss_values) > 1:
-            axes[3].hist(loss_values, bins=min(20, len(loss_values)), color='blue', alpha=0.7)
-            axes[3].set_xlabel('Loss Value')
-            axes[3].set_ylabel('Frequency')
-            axes[3].set_title('Loss Distribution')
-            axes[3].grid(True, alpha=0.3)
-            
-            # Добавляем статистику
-            import numpy as np
-            mean_loss = np.mean(loss_values)
-            std_loss = np.std(loss_values)
-            median_loss = np.median(loss_values)
-            
-            stats_text = f"Mean: {mean_loss:.4f}\nMedian: {median_loss:.4f}\nStd: {std_loss:.4f}"
-            axes[3].annotate(stats_text, xy=(0.98, 0.98), xycoords='axes fraction', 
-                          va='top', ha='right', 
-                          bbox=dict(boxstyle='round', facecolor='white', alpha=0.7))
-        else:
-            axes[3].text(0.5, 0.5, 'Not enough data for distribution analysis',
-                      transform=axes[3].transAxes, ha='center', va='center')
-            axes[3].set_xticks([])
-            axes[3].set_yticks([])
-        
-        plt.suptitle('Training Performance Analysis', fontsize=16, y=0.98)
-        plt.tight_layout()
-        
-        # Сохраняем график
-        perf_plot_path = self.plots_dir / "performance_analysis.png"
-        plt.savefig(
-            perf_plot_path,
-            dpi=self.plot_config['dpi'],
-            bbox_inches=self.plot_config['bbox_inches']
-        )
-        plt.close()
-
     def update_training_progress(self, epoch: int, metrics: Dict[str, Any], history: Dict[str, List]) -> None:
         self.metrics_history.append({
             'epoch': epoch,
@@ -269,32 +56,12 @@ class TrainingVisualizer:
             'stage': metrics.get('stage', 'standard')
         })
         
-        # Строим графики КАЖДЫЕ несколько эпох или на последней эпохе
-        plot_frequency = max(1, self.config.num_epochs // 20)  # Минимум каждые 5% эпох
-        
-        if epoch % plot_frequency == 0 or epoch == self.config.num_epochs - 1:
+        if epoch % max(1, self.config.num_epochs // 10) == 0 or epoch == self.config.num_epochs - 1:
             if MATPLOTLIB_AVAILABLE:
                 self._plot_training_curves(history)
-                # Создаем график метрик, если накоплено достаточно данных (минимум 3 эпохи)
-                if len(self.metrics_history) >= 3:
-                    self._plot_metrics_history(history)
-                
-                # Анализ производительности, начиная с 5 эпохи
-                if len(self.metrics_history) >= 5:
-                    self._plot_performance_analysis(history)
-                
-                logger.info(f"Training plots updated at epoch {epoch+1}")
             else:
-                logger.info(f"Epoch {epoch+1}: Training progress (visualization disabled)")
-        
-        # Дополнительно строим графики каждые 10 эпох для больших экспериментов
-        if epoch % 10 == 0 and epoch > 0:
-            if MATPLOTLIB_AVAILABLE:
-                self._plot_training_curves(history)
-                self._plot_metrics_history(history)
-                self._plot_performance_analysis(history)
-                logger.info(f"Periodic training plots saved at epoch {epoch+1}")
-
+                logger.info(f"Epoch {epoch}: Training progress (visualization disabled)")
+    
     def update_two_stage_progress(self, epoch: int, metrics: Dict[str, Any], history: Dict[str, List]) -> None:
         stage = metrics.get('stage', 'unknown')
         
@@ -306,48 +73,9 @@ class TrainingVisualizer:
         
         self.stage_history.append(stage)
         
-        # Строим графики периодически
-        plot_frequency = max(1, self.config.num_epochs // 20)
-        
-        if epoch % plot_frequency == 0 or epoch == self.config.num_epochs - 1:
+        if epoch % max(1, self.config.num_epochs // 10) == 0 or epoch == self.config.num_epochs - 1:
             if MATPLOTLIB_AVAILABLE:
                 self._plot_two_stage_curves(history)
-                
-                # Создаем график метрик, если накоплено достаточно данных (минимум 3 эпохи)
-                if len(self.metrics_history) >= 3:
-                    self._plot_metrics_history(history)
-                
-                # Анализ производительности, начиная с 5 эпохи
-                if len(self.metrics_history) >= 5:
-                    self._plot_performance_analysis(history)
-                
-                logger.info(f"Two-stage training plots updated at epoch {epoch+1}")
-        
-        # Дополнительно строим графики каждые 10 эпох
-        if epoch % 10 == 0 and epoch > 0:
-            if MATPLOTLIB_AVAILABLE:
-                self._plot_two_stage_curves(history)
-                self._plot_metrics_history(history)
-                self._plot_performance_analysis(history)
-                logger.info(f"Periodic two-stage plots saved at epoch {epoch+1}")
-
-    def finalize_training(self, history: Dict[str, List]) -> None:
-        if MATPLOTLIB_AVAILABLE:
-            self._create_training_summary(history)
-            self._plot_metrics_history(history)
-            self._plot_performance_analysis(history)
-            logger.info(f"Training visualizations saved to {self.plots_dir}")
-        else:
-            logger.info(f"Training completed (visualization disabled)")
-    
-    def finalize_two_stage_training(self, history: Dict[str, List]) -> None:
-        if MATPLOTLIB_AVAILABLE:
-            self._create_two_stage_summary(history)
-            self._plot_metrics_history(history)
-            self._plot_performance_analysis(history)
-            logger.info(f"Two-stage training visualizations saved to {self.plots_dir}")
-        else:
-            logger.info(f"Two-stage training completed (visualization disabled)")
     
     def _plot_training_curves(self, history: Dict[str, List]) -> None:
         if not MATPLOTLIB_AVAILABLE:
@@ -390,67 +118,11 @@ class TrainingVisualizer:
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
-        # Улучшенное отображение метрик
         if self.metrics_history:
-            recent_metrics = self.metrics_history[-10:]
+            recent_metrics = [m['metrics'] for m in self.metrics_history[-10:]]
             if recent_metrics:
-                metrics_text = "Recent Training Metrics:\n\n"
-                
-                # Средний лосс за последние 10 эпох
-                avg_loss = sum(m['metrics'].get('loss', 0) for m in recent_metrics) / len(recent_metrics)
-                metrics_text += f"Avg Loss (last 10): {avg_loss:.4f}\n"
-                
-                # Лучший лосс
-                if len(recent_metrics) > 1:
-                    best_loss = min(m['metrics'].get('loss', float('inf')) for m in recent_metrics)
-                    metrics_text += f"Best Loss: {best_loss:.4f}\n"
-                
-                # Добавляем метрики OCR, если они есть
-                cer_values = [m['metrics'].get('cer', None) for m in recent_metrics if 'cer' in m['metrics']]
-                wer_values = [m['metrics'].get('wer', None) for m in recent_metrics if 'wer' in m['metrics']]
-                
-                if cer_values:
-                    avg_cer = sum(cer_values) / len(cer_values)
-                    best_cer = min(cer_values)
-                    metrics_text += f"Avg CER: {avg_cer:.4f}\n"
-                    metrics_text += f"Best CER: {best_cer:.4f}\n"
-                    
-                if wer_values:
-                    avg_wer = sum(wer_values) / len(wer_values)
-                    best_wer = min(wer_values)
-                    metrics_text += f"Avg WER: {avg_wer:.4f}\n"
-                    metrics_text += f"Best WER: {best_wer:.4f}\n"
-                
-                # Текущий прогресс
-                current_epoch = recent_metrics[-1]['epoch'] + 1
-                total_epochs = self.config.num_epochs
-                progress_pct = (current_epoch / total_epochs) * 100
-                metrics_text += f"\nProgress: {current_epoch}/{total_epochs} ({progress_pct:.1f}%)"
-                
-                # Добавляем дополнительные метрики, если они есть
-                last_metrics = recent_metrics[-1]['metrics']
-                extra_metrics = [k for k in last_metrics.keys() if k not in ('loss', 'cer', 'wer', 'stage')]
-                if extra_metrics:
-                    metrics_text += "\n\nOther metrics:"
-                    for key in extra_metrics[:3]:  # Ограничиваем до 3 дополнительных метрик
-                        value = last_metrics[key]
-                        if isinstance(value, (int, float)):
-                            metrics_text += f"\n{key}: {value:.4f}"
-                        else:
-                            metrics_text += f"\n{key}: {value}"
-                
-                ax4.text(0.05, 0.95, metrics_text, transform=ax4.transAxes, 
-                         verticalalignment='top', horizontalalignment='left',
-                         fontsize=9, bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                ax4.text(0.1, 0.5, 'Recent Training\nMetrics', transform=ax4.transAxes)
                 ax4.axis('off')
-            else:
-                ax4.text(0.5, 0.5, 'No metrics data available', transform=ax4.transAxes,
-                        horizontalalignment='center', verticalalignment='center')
-                ax4.axis('off')
-        else:
-            ax4.text(0.5, 0.5, 'No metrics data available', transform=ax4.transAxes,
-                    horizontalalignment='center', verticalalignment='center')
-            ax4.axis('off')
         
         plt.tight_layout()
         plt.savefig(
@@ -638,15 +310,11 @@ class TrainingVisualizer:
     def finalize_training(self, history: Dict[str, List]) -> None:
         if MATPLOTLIB_AVAILABLE:
             self._create_training_summary(history)
-            self._plot_metrics_history(history)
-            self._plot_performance_analysis(history)
         logger.info(f"Training visualizations saved to {self.plots_dir}")
     
     def finalize_two_stage_training(self, history: Dict[str, List]) -> None:
         if MATPLOTLIB_AVAILABLE:
             self._create_two_stage_summary(history)
-            self._plot_metrics_history(history)
-            self._plot_performance_analysis(history)
         logger.info(f"Two-stage training visualizations saved to {self.plots_dir}")
     
     def _create_training_summary(self, history: Dict[str, List]) -> None:
@@ -768,110 +436,6 @@ Real Stage: {real_epochs_count} epochs"""
         plt.tight_layout()
         plt.savefig(
             self.plots_dir / "two_stage_training_summary.png",
-            dpi=self.plot_config['dpi'],
-            bbox_inches=self.plot_config['bbox_inches']
-        )
-        plt.close()
-    
-    def _plot_metrics_history(self, history: Dict[str, List]) -> None:
-        """
-        Создает график с детальными метриками обучения
-        """
-        if not MATPLOTLIB_AVAILABLE or not self.metrics_history:
-            return
-        
-        # Собираем доступные метрики
-        all_metrics = set()
-        for m in self.metrics_history:
-            all_metrics.update(m['metrics'].keys())
-        
-        # Исключаем 'stage', это не метрика, а индикатор этапа
-        if 'stage' in all_metrics:
-            all_metrics.remove('stage')
-        
-        # Если метрик нет, выходим
-        if not all_metrics:
-            return
-            
-        # Ограничиваем до 6 метрик для лучшей читаемости
-        if len(all_metrics) > 6:
-            priority_metrics = ['loss', 'cer', 'wer', 'accuracy', 'f1', 'precision', 'recall']
-            selected_metrics = [m for m in priority_metrics if m in all_metrics]
-            remaining = [m for m in all_metrics if m not in priority_metrics]
-            selected_metrics.extend(remaining)
-            selected_metrics = selected_metrics[:6]
-        else:
-            selected_metrics = list(all_metrics)
-        
-        # Создаем фигуру с графиками для каждой метрики
-        n_metrics = len(selected_metrics)
-        n_cols = 2
-        n_rows = (n_metrics + 1) // 2  # Округляем вверх для нечетного количества
-        
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(12, 4 * n_rows))
-        if n_metrics == 1:
-            axes = np.array([axes])
-        axes = axes.flatten()
-        
-        # Создаем график для каждой метрики
-        for i, metric_name in enumerate(selected_metrics):
-            if i < len(axes):
-                ax = axes[i]
-                
-                # Собираем значения для этой метрики
-                epochs = []
-                values = []
-                
-                for m in self.metrics_history:
-                    if metric_name in m['metrics']:
-                        epochs.append(m['epoch'])
-                        values.append(m['metrics'][metric_name])
-                
-                if values:
-                    # Построение основного графика
-                    ax.plot(epochs, values, 'o-', label=f'{metric_name}', linewidth=2)
-                    
-                    # Добавляем скользящее среднее, если точек достаточно
-                    if len(values) > 3:
-                        window_size = min(5, len(values) // 3)
-                        smoothed = self._moving_average(values, window_size)
-                        ax.plot(epochs, smoothed, 'r-', label=f'Smoothed (w={window_size})', linewidth=2)
-                    
-                    # Настройка графика
-                    ax.set_xlabel('Epoch')
-                    ax.set_ylabel(metric_name.capitalize())
-                    ax.set_title(f'{metric_name.capitalize()} vs. Epoch')
-                    ax.grid(True, alpha=0.3)
-                    ax.legend()
-                
-                    # Добавляем аннотацию с лучшим и последним значением
-                    best_idx = values.index(min(values)) if metric_name == 'loss' else values.index(max(values))
-                    best_epoch = epochs[best_idx]
-                    best_value = values[best_idx]
-                    
-                    last_value = values[-1]
-                    
-                    info_text = f"Best: {best_value:.4f} (epoch {best_epoch})\nLast: {last_value:.4f}"
-                    ax.annotate(info_text, xy=(0.02, 0.02), xycoords='axes fraction',
-                                bbox=dict(boxstyle='round', facecolor='white', alpha=0.7),
-                                va='bottom', ha='left')
-                else:
-                    ax.text(0.5, 0.5, f'No data for {metric_name}', 
-                            transform=ax.transAxes, ha='center', va='center')
-                    ax.set_xticks([])
-                    ax.set_yticks([])
-        
-        # Скрываем неиспользуемые оси
-        for i in range(len(selected_metrics), len(axes)):
-            axes[i].axis('off')
-        
-        plt.suptitle('Detailed Training Metrics', fontsize=16, y=0.98)
-        plt.tight_layout()
-        
-        # Сохраняем график
-        metrics_plot_path = self.plots_dir / "training_metrics.png"
-        plt.savefig(
-            metrics_plot_path,
             dpi=self.plot_config['dpi'],
             bbox_inches=self.plot_config['bbox_inches']
         )

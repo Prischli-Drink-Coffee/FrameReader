@@ -143,7 +143,8 @@ class BaseTrainer(ABC):
         
         self._save_checkpoint('final_model')
         try:
-            self.visualizer.finalize_training(history)
+            # Передаем metrics_collector при вызове finalize_training
+            self.visualizer.finalize_training(history, metrics_collector=self.metrics_collector)
         except Exception as e:
             self.progress_display.log_warning(f"Visualization finalization failed: {e}")
 
@@ -393,39 +394,59 @@ class StandardTrainer(BaseTrainer):
                     batch_time
                 )
                 
-                inference_metrics = None
-                if self.inference_displayer and batch_idx % 50 == 0:
-                    try:
-                        inference_display = self.inference_displayer.display_inference(
-                            batch_data, self.current_epoch, self.global_step, actual_loss, sample_idx=0
-                        )
-                        if inference_display:
-                            
-                            comparison = self.inference_displayer.inference_engine.compare_prediction_with_ground_truth(
-                                batch_data['pixel_values'][0], 
-                                batch['texts'][0]
+                # Логируем метрики по шагам
+                if batch_idx % self.train_config.log_interval == 0:
+                    inference_metrics = None
+                    if self.inference_displayer and batch_idx % 50 == 0:
+                        try:
+                            inference_display = self.inference_displayer.display_inference(
+                                batch_data, self.current_epoch, self.global_step, actual_loss, sample_idx=0
                             )
-                            
-                            if comparison['status'] == 'success':
-                                self.progress_display.log_prediction_comparison(
-                                    comparison['prediction'],
-                                    comparison['ground_truth'],
-                                    comparison['cer'],
-                                    comparison['wer']
+                            if inference_display:
+                                
+                                comparison = self.inference_displayer.inference_engine.compare_prediction_with_ground_truth(
+                                    batch_data['pixel_values'][0], 
+                                    batch['texts'][0]
                                 )
-                        
-                        recent_inference = self.inference_displayer.get_recent_metrics(last_n=5)
-                        if recent_inference['count'] > 0:
-                            inference_metrics = recent_inference
-                            self.metrics_collector.update_inference_metrics(
-                                recent_inference['avg_cer'],
-                                recent_inference['avg_wer'],
-                                recent_inference['count']
-                            )
-                    except Exception as e:
-                        logger.debug(f"Inference display error: {e}")
-                
-                if batch_idx % 10 == 0:
+                                
+                                if comparison['status'] == 'success':
+                                    self.progress_display.log_prediction_comparison(
+                                        comparison['prediction'],
+                                        comparison['ground_truth'],
+                                        comparison['cer'],
+                                        comparison['wer']
+                                    )
+                            
+                            recent_inference = self.inference_displayer.get_recent_metrics(last_n=5)
+                            if recent_inference['count'] > 0:
+                                inference_metrics = recent_inference
+                                self.metrics_collector.update_inference_metrics(
+                                    recent_inference['avg_cer'],
+                                    recent_inference['avg_wer'],
+                                    recent_inference['count']
+                                )
+                        except Exception as e:
+                            logger.debug(f"Inference display error: {e}")
+                    
+                    # Обновляем метрики для шага
+                    self.metrics_collector.update_step_metrics(
+                        self.current_epoch, 
+                        batch_idx, 
+                        actual_loss, 
+                        self.optimizer.param_groups[0]['lr'], 
+                        self.global_step,
+                        inference_metrics
+                    )
+                    
+                    # Логируем информацию о шаге
+                    self.progress_display.log_step_info(
+                        batch_idx,
+                        self.global_step,
+                        actual_loss,
+                        self.optimizer.param_groups[0]['lr'],
+                        inference_metrics
+                    )
+                    
                     self.progress_display.update_batch(
                         batch_idx, 
                         actual_loss, 
@@ -531,9 +552,9 @@ class TwoStageTrainer(BaseTrainer):
         self._save_checkpoint('final_model')
         try:
             if hasattr(self.visualizer, 'finalize_two_stage_training'):
-                self.visualizer.finalize_two_stage_training(history)
+                self.visualizer.finalize_two_stage_training(history, metrics_collector=self.metrics_collector)
             else:
-                self.visualizer.finalize_training(history)
+                self.visualizer.finalize_training(history, metrics_collector=self.metrics_collector)
         except Exception as e:
             logger.warning(f"Visualization finalization failed: {e}")
         return history

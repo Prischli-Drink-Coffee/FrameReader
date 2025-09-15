@@ -392,6 +392,7 @@ class RealtimeInferenceEngine:
         wer = comparison_result.get("wer", 1.0)
         status = comparison_result.get("status", "unknown")
         
+        # Truncate long texts for display
         max_len = 60
         pred_display = prediction[:max_len] + "..." if len(prediction) > max_len else prediction
         gt_display = ground_truth[:max_len] + "..." if len(ground_truth) > max_len else ground_truth
@@ -443,10 +444,12 @@ class TrainingInferenceDisplayer:
             return None
             
         try:
+            # Extract sample from batch
             pixel_values = batch_data.get('pixel_values', None)
             labels = batch_data.get('labels', None)
-            texts = batch_data.get('texts', None)
+            texts = batch_data.get('texts', None)  # Получаем тексты из батча
             
+            # ОТЛАДКА: Подробное логирование структуры батча
             logger.warning(f"Batch keys: {list(batch_data.keys())}")
             logger.warning(f"Texts available: {texts is not None}")
             if texts is not None:
