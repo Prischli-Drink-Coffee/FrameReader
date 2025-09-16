@@ -1,0 +1,32 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+.ipynb_checkpoints/
+
+dataset/
+data_cache/
+donut-finetune/
+detection_models/
+output_donut/
+output_trocr/
+results_donut/
+text/
+
+rtdetr-l.pt
+yolo11n.pt
+yolo12n.pt
+
+setup.log
+
+ocr_models/
+TensorRT-Model-Optimizer/
+optimized_donut_output/
+
+output/
