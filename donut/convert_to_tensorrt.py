@@ -201,7 +201,7 @@ def main():
                        help="Директория для сохранения результатов")
     parser.add_argument("--precision", type=str, default="fp16", choices=["fp32", "fp16", "int8"],
                        help="Точность TensorRT")
-    parser.add_argument("--image_size", type=int, nargs=2, default=[1280, 960],
+    parser.add_argument("--image_size", type=int, nargs=2, default=[384, 384],
                        help="Размер изображения [высота, ширина]")
     parser.add_argument("--max_batch_size", type=int, default=1,
                        help="Максимальный размер пакета")
