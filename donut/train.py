@@ -29,7 +29,7 @@ def parse_arguments():
     model_group = parser.add_argument_group("Параметры модели")
     model_group.add_argument("--model_name_or_path", type=str, default="Akajackson/donut_rus",
                         help="Имя или путь к предобученной модели")
-    model_group.add_argument("--pretrained_checkout", type=str, default="/home/student/projects/FrameReaderTrain/output/synth/exp1", 
+    model_group.add_argument("--pretrained_checkout", type=str, default="/home/student/projects/FrameReaderTrain/output/real/checkpoint-40", 
                         help="Путь к контрольной точке для продолжения обучения")
     model_group.add_argument("--image_size", type=int, nargs=2, default=[384, 384],
                         help="Размер изображения для модели [высота, ширина]")
@@ -41,16 +41,18 @@ def parse_arguments():
                         help="Токен конца промпта (если None, используется task_start_token)")
     model_group.add_argument("--sort_json_key", action="store_true",
                         help="Сортировать ключи JSON при преобразовании")
+    model_group.add_argument("--freeze_encoder", action="store_true",
+                        help="Заморозить параметры энкодера во время обучения")
     
     # Параметры обучения
     train_group = parser.add_argument_group("Параметры обучения")
-    train_group.add_argument("--output_dir", type=str, default="./output/synth",
+    train_group.add_argument("--output_dir", type=str, default="./output/real",
                         help="Директория для сохранения обученной модели")
     train_group.add_argument("--learning_rate", type=float, default=5e-6,
                         help="Скорость обучения")
     train_group.add_argument("--weight_decay", type=float, default=0.005,
                         help="Коэффициент регуляризации весов")
-    train_group.add_argument("--num_epochs", type=int, default=20,
+    train_group.add_argument("--num_epochs", type=int, default=100,
                         help="Количество эпох обучения")
     train_group.add_argument("--warmup_ratio", type=float, default=0.005,
                         help="Доля шагов разогрева для планировщика")
@@ -77,14 +79,14 @@ def parse_arguments():
                         help="Кэшировать изображения в памяти")
     data_group.add_argument("--apply_augmentation", action="store_true",
                         help="Применять аугментации для тренировочных данных")
-    data_group.add_argument("--train_limit_samples", type=int, default=10000,
+    data_group.add_argument("--train_limit_samples", type=int, default=None,
                         help="Ограничение количества образцов для тренировки (для отладки)")
     data_group.add_argument("--val_limit_samples", type=int, default=1000,
                         help="Ограничение количества образцов для валидации (для отладки)")
 
     # Параметры аугментаций
     augmentation_group = parser.add_argument_group("Параметры аугментаций")
-    augmentation_group.add_argument("--augmentation_prob", type=float, default=0.3,
+    augmentation_group.add_argument("--augmentation_prob", type=float, default=0.1,
                         help="Вероятность применения каждой аугментации")
     augmentation_group.add_argument("--max_rotation", type=float, default=8.0,
                         help="Максимальный угол поворота в градусах")
@@ -225,6 +227,12 @@ def main():
 
     start_epoch = 0
     donut_model = setup_model(args)
+    
+    if args.freeze_encoder:
+        for param in donut_model.model.encoder.parameters():
+            param.requires_grad = False
+        logger.info("Параметры энкодера заморожены")
+    
     data_module = setup_data_module(args, donut_model.processor)
     dataset_info = data_module.get_sample_info()
     logger.info(f"Информация о датасете: {dataset_info}")
