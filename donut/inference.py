@@ -142,7 +142,6 @@ class DonutInference:
             "rouge-1": [],
             "rouge-2": [],
             "rouge-l": [],
-            "accuracy": [],
             "inference_times": []
         }
         
@@ -192,8 +191,6 @@ class DonutInference:
                     
                     sample_rouge = self.metrics_calculator.calculate_rouge(pred_clean, target_clean)
                     sample_metrics.update(sample_rouge)
-                    
-                    sample_metrics["accuracy"] = 1.0 - sample_metrics["cer"]
                     
                     for metric_name, value in sample_metrics.items():
                         all_metrics[metric_name].append(value)
@@ -267,8 +264,8 @@ class DonutInference:
             ["CER", f"{metrics['cer']:.4f}"],
             ["WER", f"{metrics['wer']:.4f}"],
             ["ROUGE-1", f"{metrics['rouge-1']:.4f}"],
-            ["ROUGE-L", f"{metrics['rouge-l']:.4f}"],
-            ["Точность", f"{metrics['accuracy']:.4f}"]
+            ["ROUGE-2", f"{metrics['rouge-2']:.4f}"],
+            ["ROUGE-L", f"{metrics['rouge-l']:.4f}"]
         ]
         
         ax2.axis('off')
@@ -327,6 +324,8 @@ class DonutInference:
         ax2 = axes[0, 1]
         if metrics["rouge-1"]:
             sns.histplot(metrics["rouge-1"], kde=True, ax=ax2, color="green", alpha=0.7, label="ROUGE-1")
+        if metrics["rouge-2"]:
+            sns.histplot(metrics["rouge-2"], kde=True, ax=ax2, color="orange", alpha=0.5, label="ROUGE-2")
         if metrics["rouge-l"]:
             sns.histplot(metrics["rouge-l"], kde=True, ax=ax2, color="purple", alpha=0.5, label="ROUGE-L")
         
@@ -336,20 +335,12 @@ class DonutInference:
         ax2.legend()
 
         ax3 = axes[1, 0]
-        if metrics["accuracy"]:
-            sns.histplot(metrics["accuracy"], kde=True, ax=ax3, color="orange", alpha=0.7)
-        
-        ax3.set_title("Распределение точности", fontsize=14)
-        ax3.set_xlabel("Точность", fontsize=12)
-        ax3.set_ylabel("Частота", fontsize=12)
-
-        ax4 = axes[1, 1]
         if metrics["inference_times"]:
-            sns.histplot(metrics["inference_times"], kde=True, ax=ax4, color="teal", alpha=0.7)
+            sns.histplot(metrics["inference_times"], kde=True, ax=ax3, color="teal", alpha=0.7)
         
-        ax4.set_title("Распределение времени инференса", fontsize=14)
-        ax4.set_xlabel("Время (сек)", fontsize=12)
-        ax4.set_ylabel("Частота", fontsize=12)
+        ax3.set_title("Распределение времени инференса", fontsize=14)
+        ax3.set_xlabel("Время (сек)", fontsize=12)
+        ax3.set_ylabel("Частота", fontsize=12)
 
         plt.suptitle(f"Метрики оценки ({split})", fontsize=18)
         plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -366,8 +357,8 @@ class DonutInference:
                 'CER': metrics['cer'],
                 'WER': metrics['wer'],
                 'ROUGE-1': metrics['rouge-1'],
+                'ROUGE-2': metrics['rouge-2'],
                 'ROUGE-L': metrics['rouge-l'],
-                'Accuracy': metrics['accuracy'],
                 'Time': metrics['inference_times']
             })
             
@@ -438,7 +429,7 @@ class DonutInference:
                 f"Пример #{idx}:\n"
                 f"Предсказание: {sample['prediction']}\n"
                 f"Ожидаемое:    {sample['target']}\n"
-                f"CER: {sample['cer']:.4f}, WER: {sample['wer']:.4f}, ROUGE-L: {sample['rouge']['rouge-l']:.4f}\n"
+                f"CER: {sample['cer']:.4f}, WER: {sample['wer']:.4f}, ROUGE-2: {sample['rouge']['rouge-2']:.4f}\n"
                 f"{'-' * 80}\n"
             )
         
@@ -478,18 +469,27 @@ class DonutInferenceTRT:
     
     def __init__(
         self,
-        engine_path: str,
-        config_path: str,
+        tensorrt_dir: str,
         device: str = "cuda",
         batch_size: int = 1
     ):
-        self.engine_path = engine_path
-        self.config_path = config_path
+        self.tensorrt_dir = Path(tensorrt_dir)
         self.device = device
         self.batch_size = batch_size
         
+        self.config_path = self.tensorrt_dir / f"tensorrt_config.json"
+        self.encoder_engine_path = self.tensorrt_dir / f"model_encoder.engine"
+        self.decoder_engine_path = self.tensorrt_dir / f"model_decoder.engine"
+        
+        if not self.config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {self.config_path}")
+        if not self.encoder_engine_path.exists():
+            raise FileNotFoundError(f"Encoder engine not found: {self.encoder_engine_path}")
+        if not self.decoder_engine_path.exists():
+            raise FileNotFoundError(f"Decoder engine not found: {self.decoder_engine_path}")
+        
         # Загружаем конфигурацию
-        with open(config_path, 'r', encoding='utf-8') as f:
+        with open(self.config_path, 'r', encoding='utf-8') as f:
             self.config = json.load(f)
         
         self.task_start_token = self.config['task_start_token']
@@ -497,14 +497,16 @@ class DonutInferenceTRT:
         self.max_length = self.config['max_length']
         self.image_size = tuple(self.config['image_size'])
         
-        # Инициализируем TensorRT
-        self._init_tensorrt()
-        
         # Создаем процессор
         from transformers import DonutProcessor
         self.processor = DonutProcessor.from_pretrained(self.config['model_path'])
         
-        logger.info(f"Инициализирован TensorRT инференс для {engine_path}")
+        # Инициализируем TensorRT
+        self._init_tensorrt()
+        
+        self.metrics_calculator = MetricsCalculator()
+        
+        logger.info(f"Инициализирован TensorRT инференс для {tensorrt_dir}")
     
     def _init_tensorrt(self):
         """Инициализация TensorRT runtime."""
@@ -515,33 +517,35 @@ class DonutInferenceTRT:
                 import pycuda.driver as cuda
                 import pycuda.autoinit
                 self.cuda_available = True
+                self.cuda = cuda
             except ImportError:
                 logger.warning("PyCUDA не установлен. TensorRT inference будет работать медленнее.")
                 self.cuda_available = False
+                self.cuda = None
         except ImportError:
             raise ImportError("TensorRT не установлен")
         
         TRT_LOGGER = Logger(trt.Logger.WARNING)
         self.runtime = Runtime(TRT_LOGGER)
         
-        with open(self.engine_path, 'rb') as f:
-            engine_data = f.read()
+        # Загружаем encoder engine
+        with open(self.encoder_engine_path, 'rb') as f:
+            encoder_engine_data = f.read()
+        self.encoder_engine = self.runtime.deserialize_cuda_engine(encoder_engine_data)
+        self.encoder_context = self.encoder_engine.create_execution_context()
         
-        self.engine = self.runtime.deserialize_cuda_engine(engine_data)
-        self.context = self.engine.create_execution_context()
+        # Загружаем decoder engine
+        with open(self.decoder_engine_path, 'rb') as f:
+            decoder_engine_data = f.read()
+        self.decoder_engine = self.runtime.deserialize_cuda_engine(decoder_engine_data)
+        self.decoder_context = self.decoder_engine.create_execution_context()
         
-        # Получаем индексы входов/выходов
-        self.input_names = []
-        self.output_names = []
+        logger.info(f"TensorRT engines loaded: encoder={self.encoder_engine_path}, decoder={self.decoder_engine_path}")
         
-        for i in range(self.engine.num_bindings):
-            name = self.engine.get_binding_name(i)
-            if self.engine.binding_is_input(i):
-                self.input_names.append(name)
-            else:
-                self.output_names.append(name)
-        
-        logger.info(f"TensorRT bindings: inputs={self.input_names}, outputs={self.output_names}")
+        self.vocab_size = self.processor.tokenizer.vocab_size
+        self.encoder_seq_len = (self.image_size[0] // self.config.get('downsample_factor', 32)) * (self.image_size[1] // self.config.get('downsample_factor', 32))
+        self.encoder_output_shape = (self.batch_size, self.encoder_seq_len, self.config['hidden_size'])
+        self.decoder_output_shape = (self.batch_size, self.max_length, self.vocab_size)
     
     def predict_batch(self, pixel_values: torch.Tensor) -> List[str]:
         """Генерирует предсказания для пакета изображений с TensorRT."""
@@ -568,25 +572,33 @@ class DonutInferenceTRT:
         # Encoder inference
         encoder_outputs = self._run_encoder(pixel_values)
         
+        # Allocate device memory for encoder outputs once
+        d_encoder = self.cuda.mem_alloc(encoder_outputs.nbytes)
+        self.cuda.memcpy_htod(d_encoder, encoder_outputs)
+        
         # Decoder generation
         decoder_input_ids = torch.tensor([[self.config['decoder_start_token_id']]], dtype=torch.long)
         
         generated_tokens = []
         max_length = self.max_length
         
-        for _ in range(max_length):
-            logits = self._run_decoder(encoder_outputs, decoder_input_ids.numpy())
-            
-            next_token_id = np.argmax(logits[0, -1, :])
-            
-            if next_token_id == self.processor.tokenizer.eos_token_id:
-                break
-            
-            generated_tokens.append(next_token_id)
-            decoder_input_ids = torch.cat([
-                decoder_input_ids, 
-                torch.tensor([[next_token_id]], dtype=torch.long)
-            ], dim=1)
+        try:
+            for _ in range(max_length):
+                logits = self._run_decoder(d_encoder, decoder_input_ids.numpy())
+                
+                next_token_id = np.argmax(logits[0, -1, :])
+                
+                if next_token_id == self.processor.tokenizer.eos_token_id:
+                    break
+                
+                generated_tokens.append(next_token_id)
+                decoder_input_ids = torch.cat([
+                    decoder_input_ids, 
+                    torch.tensor([[next_token_id]], dtype=torch.long)
+                ], dim=1)
+        finally:
+            # Free device memory
+            d_encoder.free()
         
         # Декодируем токены
         pred_tokens = self.processor.tokenizer.convert_ids_to_tokens(generated_tokens)
@@ -599,70 +611,56 @@ class DonutInferenceTRT:
         if not self.cuda_available:
             raise RuntimeError("PyCUDA не установлен, TensorRT inference недоступен")
         
-        # Предполагаем, что у нас есть encoder engine
-        encoder_engine_path = self.engine_path.replace('.engine', '_encoder.engine')
-        
-        if not Path(encoder_engine_path).exists():
-            raise FileNotFoundError(f"Encoder engine не найден: {encoder_engine_path}")
-        
-        # Загружаем encoder engine
-        with open(encoder_engine_path, 'rb') as f:
-            encoder_engine_data = f.read()
-        
-        encoder_engine = self.runtime.deserialize_cuda_engine(encoder_engine_data)
-        encoder_context = encoder_engine.create_execution_context()
-        
         # Выделяем память
-        d_input = cuda.mem_alloc(pixel_values.nbytes)
-        d_output = cuda.mem_alloc(encoder_engine.get_binding_shape(1).numel() * 4)  # float32
+        d_input = self.cuda.mem_alloc(pixel_values.nbytes)
+        output_shape = self.encoder_output_shape
+        output_size = output_shape[0] * output_shape[1] * output_shape[2] * 4  # float32
+        d_output = self.cuda.mem_alloc(output_size)
         
         # Копируем входные данные
-        cuda.memcpy_htod(d_input, pixel_values)
+        self.cuda.memcpy_htod(d_input, pixel_values)
         
         # Запуск
-        encoder_context.execute_v2([int(d_input), int(d_output)])
+        self.encoder_context.execute_v2([int(d_input), int(d_output)])
         
         # Копируем результат
-        output_shape = encoder_engine.get_binding_shape(1)
-        output_size = output_shape.numel() * 4
         output = np.empty(output_shape, dtype=np.float32)
-        cuda.memcpy_dtoh(output, d_output)
+        self.cuda.memcpy_dtoh(output, d_output)
         
         return output
     
-    def _run_decoder(self, encoder_outputs: np.ndarray, decoder_input_ids: np.ndarray) -> np.ndarray:
+    def _run_decoder(self, d_encoder, decoder_input_ids: np.ndarray) -> np.ndarray:
         """Запуск decoder через TensorRT."""
         if not self.cuda_available:
             raise RuntimeError("PyCUDA не установлен, TensorRT inference недоступен")
         
-        # Аналогично для decoder
-        decoder_engine_path = self.engine_path.replace('.engine', '_decoder.engine')
-        
-        if not Path(decoder_engine_path).exists():
-            raise FileNotFoundError(f"Decoder engine не найден: {decoder_engine_path}")
-        
-        with open(decoder_engine_path, 'rb') as f:
-            decoder_engine_data = f.read()
-        
-        decoder_engine = self.runtime.deserialize_cuda_engine(decoder_engine_data)
-        decoder_context = decoder_engine.create_execution_context()
+        batch_size = decoder_input_ids.shape[0]
+        seq_len = decoder_input_ids.shape[1]
         
         # Выделяем память
-        d_encoder = cuda.mem_alloc(encoder_outputs.nbytes)
-        d_decoder_input = cuda.mem_alloc(decoder_input_ids.nbytes)
-        d_output = cuda.mem_alloc(decoder_engine.get_binding_shape(2).numel() * 4)
+        d_decoder_input = self.cuda.mem_alloc(decoder_input_ids.nbytes)
+        output_shape = (batch_size, seq_len, self.vocab_size)
+        output_size = output_shape[0] * output_shape[1] * output_shape[2] * 4
+        d_output = self.cuda.mem_alloc(output_size)
         
         # Копируем данные
-        cuda.memcpy_htod(d_encoder, encoder_outputs)
-        cuda.memcpy_htod(d_decoder_input, decoder_input_ids)
+        self.cuda.memcpy_htod(d_decoder_input, decoder_input_ids)
+        
+        # Устанавливаем формы привязок для динамических входов
+        self.decoder_context.set_binding_shape(0, decoder_input_ids.shape)  # input_ids
+        self.decoder_context.set_binding_shape(1, self.encoder_output_shape)   # encoder_hidden_states
+        self.decoder_context.set_binding_shape(2, output_shape)            # logits
         
         # Запуск
-        decoder_context.execute_v2([int(d_encoder), int(d_decoder_input), int(d_output)])
+        self.decoder_context.execute_v2([int(d_decoder_input), int(d_encoder), int(d_output)])
         
         # Копируем результат
-        output_shape = decoder_engine.get_binding_shape(2)
         output = np.empty(output_shape, dtype=np.float32)
-        cuda.memcpy_dtoh(output, d_output)
+        self.cuda.memcpy_dtoh(output, d_output)
+        
+        # Освобождаем память
+        d_decoder_input.free()
+        d_output.free()
         
         return output
     
@@ -691,7 +689,6 @@ class DonutInferenceTRT:
             "rouge-1": [],
             "rouge-2": [],
             "rouge-l": [],
-            "accuracy": [],
             "inference_times": []
         }
         
@@ -735,14 +732,12 @@ class DonutInferenceTRT:
                     all_targets.append(target_clean)
                     
                     sample_metrics = {
-                        "cer": MetricsCalculator.calculate_cer(pred_clean, target_clean),
-                        "wer": MetricsCalculator.calculate_wer(pred_clean, target_clean)
+                        "cer": self.metrics_calculator.calculate_cer(pred_clean, target_clean),
+                        "wer": self.metrics_calculator.calculate_wer(pred_clean, target_clean)
                     }
                     
-                    sample_rouge = MetricsCalculator.calculate_rouge(pred_clean, target_clean)
+                    sample_rouge = self.metrics_calculator.calculate_rouge(pred_clean, target_clean)
                     sample_metrics.update(sample_rouge)
-                    
-                    sample_metrics["accuracy"] = 1.0 - sample_metrics["cer"]
                     
                     for metric_name, value in sample_metrics.items():
                         all_metrics[metric_name].append(value)
@@ -776,7 +771,7 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
     ax.axis('off')
     
     # Данные для таблицы
-    metrics = ['CER', 'WER', 'ROUGE-1', 'ROUGE-L', 'Accuracy', 'Avg Time (ms)', 'Total Time (s)']
+    metrics = ['CER', 'WER', 'ROUGE-1', 'ROUGE-2', 'ROUGE-L', 'Avg Time (ms)', 'Total Time (s)']
     
     model_1_name = results_1.get('model_name', 'Model 1')
     model_2_name = results_2.get('model_name', 'Model 2')
@@ -786,8 +781,8 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
         ['CER', f"{results_1['cer']:.4f}", f"{results_2['cer']:.4f}", f"{results_2['cer'] - results_1['cer']:.4f}"],
         ['WER', f"{results_1['wer']:.4f}", f"{results_2['wer']:.4f}", f"{results_2['wer'] - results_1['wer']:.4f}"],
         ['ROUGE-1', f"{results_1['rouge-1']:.4f}", f"{results_2['rouge-1']:.4f}", f"{results_2['rouge-1'] - results_1['rouge-1']:.4f}"],
+        ['ROUGE-2', f"{results_1['rouge-2']:.4f}", f"{results_2['rouge-2']:.4f}", f"{results_2['rouge-2'] - results_1['rouge-2']:.4f}"],
         ['ROUGE-L', f"{results_1['rouge-l']:.4f}", f"{results_2['rouge-l']:.4f}", f"{results_2['rouge-l'] - results_1['rouge-l']:.4f}"],
-        ['Accuracy', f"{results_1['accuracy']:.4f}", f"{results_2['accuracy']:.4f}", f"{results_2['accuracy'] - results_1['accuracy']:.4f}"],
         ['Avg Time (ms)', f"{results_1['avg_time_per_sample']*1000:.2f}", f"{results_2['avg_time_per_sample']*1000:.2f}", f"{(results_2['avg_time_per_sample'] - results_1['avg_time_per_sample'])*1000:.2f}"],
         ['Total Time (s)', f"{results_1['total_time']:.2f}", f"{results_2['total_time']:.2f}", f"{results_2['total_time'] - results_1['total_time']:.2f}"],
         ['Samples', str(results_1['num_samples']), str(results_2['num_samples']), '-']
@@ -813,8 +808,6 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
         elif row % 2 == 0:
             cell.set_facecolor('#F2F2F2')
     
-    plt.title('Сравнение моделей Donut', fontsize=16, pad=20)
-    
     comparison_file = output_dir / "model_comparison.png"
     plt.savefig(comparison_file, dpi=150, bbox_inches='tight')
     plt.close()
@@ -831,24 +824,24 @@ def parse_arguments():
     model_group = parser.add_argument_group("Параметры модели")
     model_group.add_argument("--model_path", type=str, required=True,
                         help="Путь к обученной модели")
-    model_group.add_argument("--image_size", type=int, nargs=2, default=[1280, 960],
+    model_group.add_argument("--image_size", type=int, nargs=2, default=[384, 384],
                         help="Размер изображения для модели [высота, ширина]")
-    model_group.add_argument("--max_length", type=int, default=768,
+    model_group.add_argument("--max_length", type=int, default=64,
                         help="Максимальная длина генерации")
     model_group.add_argument("--num_beams", type=int, default=5,
                         help="Количество лучей для генерации")
-    model_group.add_argument("--task_start_token", type=str, default=None,
+    model_group.add_argument("--task_start_token", type=str, default='<s_500k>',
                         help="Токен начала задачи (если None, берется из модели)")
     model_group.add_argument("--prompt_end_token", type=str, default=None,
                         help="Токен конца промпта (если None, берется из модели)")
     
     # Параметры вывода
     output_group = parser.add_argument_group("Параметры вывода")
-    output_group.add_argument("--output_dir", type=str, default="./inference_results",
+    output_group.add_argument("--output_dir", type=str, default="./output/inference_results",
                         help="Директория для сохранения результатов")
     output_group.add_argument("--save_visualizations", action="store_true", default=True,
                         help="Сохранять визуализации результатов")
-    output_group.add_argument("--batch_size", type=int, default=1,
+    output_group.add_argument("--batch_size", type=int, default=80,
                         help="Размер пакета для инференса")
     
     # Режимы работы
@@ -857,31 +850,27 @@ def parse_arguments():
                         help="Режим работы: одиночное изображение, датасет, оба или сравнение моделей")
     mode_group.add_argument("--image_path", type=str, default=None,
                         help="Путь к изображению для одиночной оценки")
-    mode_group.add_argument("--data_dir", type=str, default=None,
+    mode_group.add_argument("--data_dir", type=str, default='./dataset/ocr/donut/real',
                         help="Директория с данными для оценки датасета")
-    mode_group.add_argument("--split", type=str, choices=["train", "valid", "test"], default="test",
+    mode_group.add_argument("--split", type=str, choices=["train", "valid", "test"], default="valid",
                         help="Раздел данных для оценки")
-    mode_group.add_argument("--num_samples", type=int, default=None,
+    mode_group.add_argument("--num_samples", type=int, default=1000,
                         help="Количество образцов для оценки (если None, все доступные)")
     
     # Параметры сравнения моделей
     compare_group = parser.add_argument_group("Параметры сравнения моделей")
-    compare_group.add_argument("--model_path_2", type=str, default=None,
+    compare_group.add_argument("--model_path_2", type=str, default='./output/tensorrt',
                         help="Путь ко второй модели для сравнения")
     compare_group.add_argument("--model_type_1", type=str, choices=["pytorch", "tensorrt"], default="pytorch",
                         help="Тип первой модели")
-    compare_group.add_argument("--model_type_2", type=str, choices=["pytorch", "tensorrt"], default="pytorch",
+    compare_group.add_argument("--model_type_2", type=str, choices=["pytorch", "tensorrt"], default="tensorrt",
                         help="Тип второй модели")
-    compare_group.add_argument("--tensorrt_config_1", type=str, default=None,
-                        help="Путь к конфигу TensorRT для первой модели")
-    compare_group.add_argument("--tensorrt_config_2", type=str, default=None,
-                        help="Путь к конфигу TensorRT для второй модели")
     
     # Параметры вычислений
     compute_group = parser.add_argument_group("Параметры вычислений")
     compute_group.add_argument("--device", type=str, default=None,
                         help="Устройство для вычислений ('cpu' или 'cuda')")
-    compute_group.add_argument("--precision", type=str, default="fp32",
+    compute_group.add_argument("--precision", type=str, default="bf16",
                         choices=["fp32", "fp16", "bf16"],
                         help="Точность вычислений")
     compute_group.add_argument("--num_workers", type=int, default=4,
@@ -981,8 +970,7 @@ def main():
 
             logger.info(f"Метрики для {args.split} ({metrics['num_samples']} образцов):")
             logger.info(f"CER: {metrics['cer']:.4f}, WER: {metrics['wer']:.4f}")
-            logger.info(f"ROUGE-1: {metrics['rouge-1']:.4f}, ROUGE-L: {metrics['rouge-l']:.4f}")
-            logger.info(f"Accuracy: {metrics['accuracy']:.4f}")
+            logger.info(f"ROUGE-1: {metrics['rouge-1']:.4f}, ROUGE-2: {metrics['rouge-2']:.4f}, ROUGE-L: {metrics['rouge-l']:.4f}")
             logger.info(f"Среднее время на образец: {metrics['avg_time_per_sample']:.4f} сек")
             
         except Exception as e:
@@ -1008,12 +996,8 @@ def main():
                     image_size=args.image_size
                 )
             elif args.model_type_1 == "tensorrt":
-                if args.tensorrt_config_1 is None:
-                    logger.error("Для TensorRT модели требуется указать --tensorrt_config_1")
-                    return 1
                 inference_1 = DonutInferenceTRT(
-                    engine_path=args.model_path,
-                    config_path=args.tensorrt_config_1,
+                    tensorrt_dir=args.model_path,
                     device=args.device,
                     batch_size=args.batch_size
                 )
@@ -1034,12 +1018,8 @@ def main():
                     image_size=args.image_size
                 )
             elif args.model_type_2 == "tensorrt":
-                if args.tensorrt_config_2 is None:
-                    logger.error("Для TensorRT модели требуется указать --tensorrt_config_2")
-                    return 1
                 inference_2 = DonutInferenceTRT(
-                    engine_path=args.model_path_2,
-                    config_path=args.tensorrt_config_2,
+                    tensorrt_dir=args.model_path_2,
                     device=args.device,
                     batch_size=args.batch_size
                 )

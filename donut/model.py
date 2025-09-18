@@ -128,6 +128,11 @@ class DonutModel:
         logger.info(f"Загрузка предварительно обученной модели Donut из {model_name_or_path}")
 
         try:
+            # Set defaults
+            precision = "fp32"
+            max_length = 768
+            task_start_token = "<s>"
+            prompt_end_token = None
 
             donut_config_path = Path(model_name_or_path) / "donut_config.json"
             if donut_config_path.exists():
@@ -150,6 +155,14 @@ class DonutModel:
                     if "precision" in donut_config:
                         precision = donut_config["precision"]
                         logger.info(f"Использую precision: {precision}")
+
+            # Override with kwargs if provided
+            precision = kwargs.pop('precision', precision)
+            max_length = kwargs.pop('max_length', max_length)
+            task_start_token = kwargs.pop('task_start_token', task_start_token)
+            prompt_end_token = kwargs.pop('prompt_end_token', prompt_end_token)
+            # Pop image_size if present, as it's not used in model loading
+            kwargs.pop('image_size', None)
 
             processor = DonutProcessor.from_pretrained(model_name_or_path, revision=revision, use_fust=True)
             config = VisionEncoderDecoderConfig.from_pretrained(model_name_or_path, revision=revision)
