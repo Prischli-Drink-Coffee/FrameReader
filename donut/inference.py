@@ -509,160 +509,407 @@ class DonutInferenceTRT:
         logger.info(f"Инициализирован TensorRT инференс для {tensorrt_dir}")
     
     def _init_tensorrt(self):
-        """Инициализация TensorRT runtime."""
+        """Инициализация TensorRT для версии 10.9.0.34."""
         try:
             import tensorrt as trt
-            from tensorrt import Logger, Runtime
-            try:
-                import pycuda.driver as cuda
-                import pycuda.autoinit
-                self.cuda_available = True
-                self.cuda = cuda
-            except ImportError:
-                logger.warning("PyCUDA не установлен. TensorRT inference будет работать медленнее.")
-                self.cuda_available = False
-                self.cuda = None
-        except ImportError:
-            raise ImportError("TensorRT не установлен")
+            import pycuda.driver as cuda
+            import pycuda.autoinit
+            
+            self.cuda = cuda
+            self.cuda_available = True
+            self.trt = trt
+            
+        except ImportError as e:
+            logger.error(f"Не удалось импортировать TensorRT или PyCUDA: {e}")
+            raise ImportError("TensorRT или PyCUDA не установлены")
         
-        TRT_LOGGER = Logger(trt.Logger.WARNING)
-        self.runtime = Runtime(TRT_LOGGER)
+        TRT_LOGGER = trt.Logger(trt.Logger.INFO)
+        runtime = trt.Runtime(TRT_LOGGER)
         
         # Загружаем encoder engine
         with open(self.encoder_engine_path, 'rb') as f:
             encoder_engine_data = f.read()
-        self.encoder_engine = self.runtime.deserialize_cuda_engine(encoder_engine_data)
+        self.encoder_engine = runtime.deserialize_cuda_engine(encoder_engine_data)
         self.encoder_context = self.encoder_engine.create_execution_context()
         
         # Загружаем decoder engine
         with open(self.decoder_engine_path, 'rb') as f:
             decoder_engine_data = f.read()
-        self.decoder_engine = self.runtime.deserialize_cuda_engine(decoder_engine_data)
+        self.decoder_engine = runtime.deserialize_cuda_engine(decoder_engine_data)
         self.decoder_context = self.decoder_engine.create_execution_context()
         
-        logger.info(f"TensorRT engines loaded: encoder={self.encoder_engine_path}, decoder={self.decoder_engine_path}")
+        logger.info(f"TensorRT engines loaded")
         
-        self.vocab_size = self.processor.tokenizer.vocab_size
-        self.encoder_seq_len = (self.image_size[0] // self.config.get('downsample_factor', 32)) * (self.image_size[1] // self.config.get('downsample_factor', 32))
-        self.encoder_output_shape = (self.batch_size, self.encoder_seq_len, self.config['hidden_size'])
-        self.decoder_output_shape = (self.batch_size, self.max_length, self.vocab_size)
+        # Создаем CUDA stream
+        self.cuda_stream = cuda.Stream()
+        
+        # Получаем информацию о тензорах для encoder
+        self.encoder_inputs = {}
+        self.encoder_outputs = {}
+        self.encoder_buffers = {}
+        self.encoder_gpu_buffers = {}  # GPU buffers
+        
+        for i in range(self.encoder_engine.num_io_tensors):
+            name = self.encoder_engine.get_tensor_name(i)
+            mode = self.encoder_engine.get_tensor_mode(name)
+            shape = tuple(self.encoder_engine.get_tensor_shape(name))
+            
+            logger.info(f"Encoder tensor {i}: {name}, mode={mode}, shape={shape}")
+            
+            tensor_info = {
+                'mode': mode,
+                'shape': shape,
+                'dtype': np.float32
+            }
+            
+            if mode == trt.TensorIOMode.INPUT:
+                self.encoder_inputs[name] = tensor_info
+                if 'pixel_values' in name.lower() or i == 0:
+                    self.encoder_input_name = name
+                    self.encoder_input_shape = shape
+                # Создаем GPU буфер для входа
+                size = int(np.prod(shape) * np.dtype(np.float32).itemsize)
+                gpu_buffer = cuda.mem_alloc(size)
+                self.encoder_gpu_buffers[name] = gpu_buffer
+                self.encoder_buffers[name] = np.empty(shape, dtype=np.float32)
+            else:
+                self.encoder_outputs[name] = tensor_info
+                # Создаем буферы для всех выходов
+                size = int(np.prod(shape) * np.dtype(np.float32).itemsize)
+                gpu_buffer = cuda.mem_alloc(size)
+                self.encoder_gpu_buffers[name] = gpu_buffer
+                self.encoder_buffers[name] = np.empty(shape, dtype=np.float32)
+                
+                # Определяем основной выход (encoder_outputs)
+                if 'encoder_outputs' in name.lower() or 'hidden' in name.lower():
+                    self.encoder_output_name = name
+                    self.encoder_output_shape = shape
+        
+        # Получаем информацию о тензорах для decoder
+        self.decoder_inputs = {}
+        self.decoder_outputs = {}
+        self.decoder_gpu_buffers = {}
+        
+        for i in range(self.decoder_engine.num_io_tensors):
+            name = self.decoder_engine.get_tensor_name(i)
+            mode = self.decoder_engine.get_tensor_mode(name)
+            shape = tuple(self.decoder_engine.get_tensor_shape(name))
+            
+            logger.info(f"Decoder tensor {i}: {name}, mode={mode}, shape={shape}")
+            
+            if mode == trt.TensorIOMode.INPUT:
+                tensor_info = {
+                    'mode': mode,
+                    'shape': shape,
+                    'dtype': np.int32 if 'input_ids' in name.lower() else np.float32
+                }
+                self.decoder_inputs[name] = tensor_info
+                
+                if 'input_ids' in name.lower():
+                    self.decoder_input_ids_name = name
+                    self.decoder_input_ids_shape = shape
+                elif 'encoder_hidden' in name.lower() or 'hidden' in name.lower():
+                    self.decoder_encoder_hidden_name = name
+                    self.decoder_encoder_hidden_shape = shape
+            else:
+                tensor_info = {
+                    'mode': mode,
+                    'shape': shape,
+                    'dtype': np.float32
+                }
+                self.decoder_outputs[name] = tensor_info
+                
+                # Определяем основной выход (logits)
+                if 'logits' in name.lower() or i == 0:
+                    self.decoder_output_name = name
+                    self.decoder_output_shape = shape
+    
+    def __del__(self):
+        """Очистка ресурсов CUDA."""
+        try:
+            # Освобождаем GPU буферы encoder
+            if hasattr(self, 'encoder_gpu_buffers'):
+                for buffer in self.encoder_gpu_buffers.values():
+                    buffer.free()
+            
+            # Освобождаем GPU буферы decoder  
+            if hasattr(self, 'decoder_gpu_buffers'):
+                for buffer in self.decoder_gpu_buffers.values():
+                    buffer.free()
+                    
+            # Освобождаем stream
+            if hasattr(self, 'cuda_stream'):
+                del self.cuda_stream
+                
+        except Exception as e:
+            logger.warning(f"Ошибка при освобождении CUDA ресурсов: {e}")
+
+    def _set_binding_shapes(self, context, binding_shapes):
+        """Устанавливает формы binding для контекста."""
+        for binding_name, shape in binding_shapes.items():
+            context.set_binding_shape(binding_name, shape)
     
     def predict_batch(self, pixel_values: torch.Tensor) -> List[str]:
         """Генерирует предсказания для пакета изображений с TensorRT."""
-        import torch
-        import numpy as np
-        
         pixel_values = pixel_values.to('cpu').numpy()
         batch_size = pixel_values.shape[0]
         
-        # Для простоты используем последовательную генерацию
         predictions = []
         
         for i in range(batch_size):
-            pred = self._generate_single(pixel_values[i:i+1])
-            predictions.append(pred)
+            try:
+                # Получаем encoder outputs
+                encoder_outputs = self._run_encoder(pixel_values[i:i+1])
+                
+                # Генерируем последовательность
+                pred = self._generate_single(encoder_outputs)
+                # logger.info(f"Предсказание для изображения {i}: {pred}")
+                predictions.append(pred)
+                
+            except Exception as e:
+                logger.error(f"Ошибка при генерации для изображения {i}: {e}")
+                predictions.append("")
         
         return predictions
     
-    def _generate_single(self, pixel_values: np.ndarray) -> str:
+    def _generate_single(self, encoder_outputs: np.ndarray) -> str:
         """Генерирует предсказание для одного изображения."""
-        import torch
         import numpy as np
         
-        # Encoder inference
-        encoder_outputs = self._run_encoder(pixel_values)
+        # Получаем правильный стартовый токен - используем decoder_start_token_id из конфигурации
+        decoder_start_token_id = self.config.get('decoder_start_token_id')
         
-        # Allocate device memory for encoder outputs once
-        d_encoder = self.cuda.mem_alloc(encoder_outputs.nbytes)
-        self.cuda.memcpy_htod(d_encoder, encoder_outputs)
+        if decoder_start_token_id is None:
+            # Fallback: пытаемся найти правильный токен
+            task_start_token = self.config.get('task_start_token', '<s_500k>')
+            try:
+                decoder_start_token_id = self.processor.tokenizer.convert_tokens_to_ids(task_start_token)
+                if decoder_start_token_id == self.processor.tokenizer.unk_token_id:
+                    # Если не найден, используем bos_token_id
+                    decoder_start_token_id = self.processor.tokenizer.bos_token_id
+            except:
+                decoder_start_token_id = self.processor.tokenizer.bos_token_id
         
-        # Decoder generation
-        decoder_input_ids = torch.tensor([[self.config['decoder_start_token_id']]], dtype=torch.long)
+        # logger.info(f"Используем decoder_start_token_id: {decoder_start_token_id}")
+        
+        # Инициализируем вход decoder с правильным стартовым токеном
+        decoder_input_ids = np.array([[decoder_start_token_id]], dtype=np.int32)
         
         generated_tokens = []
         max_length = self.max_length
         
-        try:
-            for _ in range(max_length):
-                logits = self._run_decoder(d_encoder, decoder_input_ids.numpy())
+        # Получаем токены для остановки генерации
+        eos_token_id = self.processor.tokenizer.eos_token_id
+        pad_token_id = getattr(self.processor.tokenizer, 'pad_token_id', None)
+        
+        # logger.info(f"Начинаем генерацию, max_length: {max_length}, eos_id: {eos_token_id}, pad_id: {pad_token_id}")
+        
+        for step in range(max_length):
+            try:
+                # Запускаем decoder
+                logits = self._run_decoder(encoder_outputs, decoder_input_ids)
+
+                # Получаем следующий токен
+                next_token_logits = logits[0, -1, :]
                 
-                next_token_id = np.argmax(logits[0, -1, :])
+                # Применяем temperature и top-k sampling для разнообразия
+                temperature = 1.0
+                top_k = 50
                 
-                if next_token_id == self.processor.tokenizer.eos_token_id:
+                # Применяем temperature
+                next_token_logits = next_token_logits / temperature
+                
+                # Top-k фильтрация
+                top_k_indices = np.argpartition(next_token_logits, -top_k)[-top_k:]
+                top_k_logits = next_token_logits[top_k_indices]
+                
+                # Softmax для получения вероятностей
+                exp_logits = np.exp(top_k_logits - np.max(top_k_logits))
+                probs = exp_logits / np.sum(exp_logits)
+                
+                # Выбираем токен на основе вероятностей (с небольшой рандомностью)
+                if step < 3:  # Первые несколько токенов берем наиболее вероятные
+                    next_token_idx = np.argmax(probs)
+                else:
+                    # Добавляем немного рандомности
+                    next_token_idx = np.random.choice(len(probs), p=probs)
+                
+                next_token_id = int(top_k_indices[next_token_idx])
+                
+                # Выводим отладочную информацию для первых шагов
+                if step < 5:
+                    top_5_indices = np.argsort(next_token_logits)[-5:][::-1]
+                    top_5_logits = next_token_logits[top_5_indices]
+                    top_5_tokens = [self.processor.tokenizer.convert_ids_to_tokens(int(idx)) for idx in top_5_indices]
+                    # logger.info(f"Step {step}: top 5 tokens: {list(zip(top_5_tokens, top_5_indices, top_5_logits))}")
+                    # logger.info(f"Step {step}: selected token_id={next_token_id}, token='{self.processor.tokenizer.convert_ids_to_tokens(next_token_id)}'")
+                
+                # Проверяем на токены остановки
+                if next_token_id == eos_token_id:
+                    # logger.info(f"Встретили EOS токен на шаге {step}")
+                    break
+                
+                if pad_token_id is not None and next_token_id == pad_token_id:
+                    # logger.info(f"Встретили PAD токен на шаге {step}")
+                    break
+                
+                # Проверяем на зацикливание (если последние 3 токена одинаковые)
+                if len(generated_tokens) >= 3 and all(t == next_token_id for t in generated_tokens[-3:]):
+                    # logger.warning(f"Обнаружено зацикливание на токене {next_token_id}, останавливаем генерацию")
                     break
                 
                 generated_tokens.append(next_token_id)
-                decoder_input_ids = torch.cat([
-                    decoder_input_ids, 
-                    torch.tensor([[next_token_id]], dtype=torch.long)
-                ], dim=1)
-        finally:
-            # Free device memory
-            d_encoder.free()
+                
+                # Обновляем вход decoder
+                new_input = np.array([[next_token_id]], dtype=np.int32)
+                decoder_input_ids = np.concatenate([decoder_input_ids, new_input], axis=1)
+                
+                # Обрезаем если слишком длинная последовательность (оставляем окно контекста)
+                max_context_len = 64  # Уменьшаем контекст для стабильности
+                if decoder_input_ids.shape[1] > max_context_len:
+                    # Сохраняем стартовый токен и последние токены
+                    start_part = decoder_input_ids[:, :1]  # Стартовый токен
+                    end_part = decoder_input_ids[:, -(max_context_len-1):]  # Последние токены
+                    decoder_input_ids = np.concatenate([start_part, end_part], axis=1)
+                    
+            except Exception as e:
+                logger.error(f"Ошибка на шаге {step}: {e}")
+                break
         
         # Декодируем токены
-        pred_tokens = self.processor.tokenizer.convert_ids_to_tokens(generated_tokens)
-        pred_text = self.processor.tokenizer.convert_tokens_to_string(pred_tokens)
+        if generated_tokens:
+            try:
+                pred_text = self.processor.tokenizer.decode(generated_tokens, skip_special_tokens=True)
+                # Очищаем текст от артефактов
+                pred_text = pred_text.strip()
+            except Exception as e:
+                logger.error(f"Ошибка при декодировании токенов: {e}")
+                pred_text = ""
+        else:
+            logger.warning("Не сгенерировано ни одного токена!")
+            pred_text = ""
+
+        # logger.info(f"Сгенерированные токены: {generated_tokens[:10]}{'...' if len(generated_tokens) > 10 else ''}")
+        # logger.info(f"Сгенерированный текст: '{pred_text}'")
         
         return pred_text
     
     def _run_encoder(self, pixel_values: np.ndarray) -> np.ndarray:
         """Запуск encoder через TensorRT."""
-        if not self.cuda_available:
-            raise RuntimeError("PyCUDA не установлен, TensorRT inference недоступен")
+        import numpy as np
         
-        # Выделяем память
-        d_input = self.cuda.mem_alloc(pixel_values.nbytes)
-        output_shape = self.encoder_output_shape
-        output_size = output_shape[0] * output_shape[1] * output_shape[2] * 4  # float32
-        d_output = self.cuda.mem_alloc(output_size)
+        # Подготавливаем входные данные
+        if pixel_values.shape != self.encoder_input_shape:
+            pixel_values = pixel_values.reshape(self.encoder_input_shape)
         
-        # Копируем входные данные
-        self.cuda.memcpy_htod(d_input, pixel_values)
+        # Убеждаемся, что данные в правильном формате
+        pixel_values = pixel_values.astype(np.float32)
         
-        # Запуск
-        self.encoder_context.execute_v2([int(d_input), int(d_output)])
-        
-        # Копируем результат
-        output = np.empty(output_shape, dtype=np.float32)
-        self.cuda.memcpy_dtoh(output, d_output)
-        
-        return output
+        try:
+            # Копируем входные данные в GPU
+            self.cuda.memcpy_htod_async(
+                self.encoder_gpu_buffers[self.encoder_input_name], 
+                pixel_values, 
+                self.cuda_stream
+            )
+            
+            # Устанавливаем адреса тензоров на GPU буферы
+            for name, gpu_buffer in self.encoder_gpu_buffers.items():
+                self.encoder_context.set_tensor_address(name, int(gpu_buffer))
+            
+            # Запускаем inference
+            success = self.encoder_context.execute_async_v3(self.cuda_stream.handle)
+            if not success:
+                raise RuntimeError("Encoder inference failed")
+            
+            # Синхронизируем stream
+            self.cuda_stream.synchronize()
+            
+            # Копируем результат обратно в CPU
+            output_buffer = self.encoder_buffers[self.encoder_output_name]
+            self.cuda.memcpy_dtoh_async(
+                output_buffer, 
+                self.encoder_gpu_buffers[self.encoder_output_name], 
+                self.cuda_stream
+            )
+            self.cuda_stream.synchronize()
+            
+            return output_buffer.copy()
+            
+        except Exception as e:
+            logger.error(f"Ошибка в encoder: {e}")
+            raise
     
-    def _run_decoder(self, d_encoder, decoder_input_ids: np.ndarray) -> np.ndarray:
+    def _run_decoder(self, encoder_outputs: np.ndarray, decoder_input_ids: np.ndarray) -> np.ndarray:
         """Запуск decoder через TensorRT."""
-        if not self.cuda_available:
-            raise RuntimeError("PyCUDA не установлен, TensorRT inference недоступен")
+        import numpy as np
         
-        batch_size = decoder_input_ids.shape[0]
-        seq_len = decoder_input_ids.shape[1]
+        # Подготавливаем входные данные
+        encoder_outputs = encoder_outputs.astype(np.float32)
+        decoder_input_ids = decoder_input_ids.astype(np.int32)
         
-        # Выделяем память
-        d_decoder_input = self.cuda.mem_alloc(decoder_input_ids.nbytes)
-        output_shape = (batch_size, seq_len, self.vocab_size)
-        output_size = output_shape[0] * output_shape[1] * output_shape[2] * 4
-        d_output = self.cuda.mem_alloc(output_size)
+        # Обновляем динамические размеры
+        current_seq_len = decoder_input_ids.shape[1]
         
-        # Копируем данные
-        self.cuda.memcpy_htod(d_decoder_input, decoder_input_ids)
+        # Устанавливаем формы для динамических размеров
+        self.decoder_context.set_input_shape(self.decoder_input_ids_name, decoder_input_ids.shape)
         
-        # Устанавливаем формы привязок для динамических входов
-        self.decoder_context.set_binding_shape(0, decoder_input_ids.shape)  # input_ids
-        self.decoder_context.set_binding_shape(1, self.encoder_output_shape)   # encoder_hidden_states
-        self.decoder_context.set_binding_shape(2, output_shape)            # logits
+        # Создаем GPU буферы для этого вызова (для динамических размеров)
+        decoder_gpu_buffers = {}
+        decoder_cpu_buffers = {}
         
-        # Запуск
-        self.decoder_context.execute_v2([int(d_decoder_input), int(d_encoder), int(d_output)])
+        # Входные буферы
+        for name, tensor_info in self.decoder_inputs.items():
+            if name == self.decoder_input_ids_name:
+                shape = decoder_input_ids.shape
+                data = decoder_input_ids
+            else:  # encoder hidden states
+                shape = encoder_outputs.shape
+                data = encoder_outputs
+            
+            size = int(np.prod(shape) * np.dtype(tensor_info['dtype']).itemsize)
+            gpu_buffer = self.cuda.mem_alloc(size)
+            decoder_gpu_buffers[name] = gpu_buffer
+            
+            # Копируем данные в GPU
+            self.cuda.memcpy_htod_async(gpu_buffer, data, self.cuda_stream)
         
-        # Копируем результат
-        output = np.empty(output_shape, dtype=np.float32)
-        self.cuda.memcpy_dtoh(output, d_output)
+        # Выходные буферы
+        for name, tensor_info in self.decoder_outputs.items():
+            actual_shape = self.decoder_context.get_tensor_shape(name)
+            size = int(np.prod(actual_shape) * np.dtype(tensor_info['dtype']).itemsize)
+            gpu_buffer = self.cuda.mem_alloc(size)
+            decoder_gpu_buffers[name] = gpu_buffer
+            decoder_cpu_buffers[name] = np.empty(actual_shape, dtype=tensor_info['dtype'])
         
-        # Освобождаем память
-        d_decoder_input.free()
-        d_output.free()
-        
-        return output
+        try:
+            # Устанавливаем адреса тензоров
+            for name, gpu_buffer in decoder_gpu_buffers.items():
+                self.decoder_context.set_tensor_address(name, int(gpu_buffer))
+            
+            # Запускаем inference
+            success = self.decoder_context.execute_async_v3(self.cuda_stream.handle)
+            if not success:
+                raise RuntimeError("Decoder inference failed")
+            
+            # Синхронизируем stream
+            self.cuda_stream.synchronize()
+            
+            # Копируем результат обратно в CPU
+            output_buffer = decoder_cpu_buffers[self.decoder_output_name]
+            self.cuda.memcpy_dtoh_async(
+                output_buffer, 
+                decoder_gpu_buffers[self.decoder_output_name], 
+                self.cuda_stream
+            )
+            self.cuda_stream.synchronize()
+            
+            return output_buffer.copy()
+            
+        finally:
+            # Освобождаем временные GPU буферы
+            for buffer in decoder_gpu_buffers.values():
+                buffer.free()
     
     def evaluate_dataset(
         self, 
@@ -763,15 +1010,16 @@ class DonutInferenceTRT:
 
 
 def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any], output_dir: Path):
-    """Создает таблицу сравнения двух моделей и сохраняет как изображение."""
+    """Создает таблицу сравнения двух моделей и сохраняет как изображение и JSON."""
     import matplotlib.pyplot as plt
     import numpy as np
+    from datetime import datetime
     
     fig, ax = plt.subplots(figsize=(12, 8))
     ax.axis('off')
     
     # Данные для таблицы
-    metrics = ['CER', 'WER', 'ROUGE-1', 'ROUGE-2', 'ROUGE-L', 'Avg Time (ms)', 'Total Time (s)']
+    metrics = ['CER', 'WER', 'ROUGE-2', 'ROUGE-L', 'Avg Time (ms)', 'Total Time (s)']
     
     model_1_name = results_1.get('model_name', 'Model 1')
     model_2_name = results_2.get('model_name', 'Model 2')
@@ -780,13 +1028,111 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
         ['Метрика', model_1_name, model_2_name, 'Разница'],
         ['CER', f"{results_1['cer']:.4f}", f"{results_2['cer']:.4f}", f"{results_2['cer'] - results_1['cer']:.4f}"],
         ['WER', f"{results_1['wer']:.4f}", f"{results_2['wer']:.4f}", f"{results_2['wer'] - results_1['wer']:.4f}"],
-        ['ROUGE-1', f"{results_1['rouge-1']:.4f}", f"{results_2['rouge-1']:.4f}", f"{results_2['rouge-1'] - results_1['rouge-1']:.4f}"],
+        # ['ROUGE-1', f"{results_1['rouge-1']:.4f}", f"{results_2['rouge-1']:.4f}", f"{results_2['rouge-1'] - results_1['rouge-1']:.4f}"],
         ['ROUGE-2', f"{results_1['rouge-2']:.4f}", f"{results_2['rouge-2']:.4f}", f"{results_2['rouge-2'] - results_1['rouge-2']:.4f}"],
         ['ROUGE-L', f"{results_1['rouge-l']:.4f}", f"{results_2['rouge-l']:.4f}", f"{results_2['rouge-l'] - results_1['rouge-l']:.4f}"],
         ['Avg Time (ms)', f"{results_1['avg_time_per_sample']*1000:.2f}", f"{results_2['avg_time_per_sample']*1000:.2f}", f"{(results_2['avg_time_per_sample'] - results_1['avg_time_per_sample'])*1000:.2f}"],
         ['Total Time (s)', f"{results_1['total_time']:.2f}", f"{results_2['total_time']:.2f}", f"{results_2['total_time'] - results_1['total_time']:.2f}"],
         ['Samples', str(results_1['num_samples']), str(results_2['num_samples']), '-']
     ]
+    
+    # Создаем структурированные данные для JSON
+    comparison_data = {
+        "metadata": {
+            "comparison_timestamp": datetime.now().isoformat(),
+            "model_1_name": model_1_name,
+            "model_2_name": model_2_name,
+            "total_samples_model_1": results_1['num_samples'],
+            "total_samples_model_2": results_2['num_samples']
+        },
+        "metrics": {
+            "cer": {
+                "model_1": results_1['cer'],
+                "model_2": results_2['cer'],
+                "difference": results_2['cer'] - results_1['cer'],
+                "improvement": "model_1" if results_1['cer'] < results_2['cer'] else "model_2",
+                "improvement_percentage": abs((results_2['cer'] - results_1['cer']) / results_1['cer'] * 100) if results_1['cer'] != 0 else 0
+            },
+            "wer": {
+                "model_1": results_1['wer'],
+                "model_2": results_2['wer'],
+                "difference": results_2['wer'] - results_1['wer'],
+                "improvement": "model_1" if results_1['wer'] < results_2['wer'] else "model_2",
+                "improvement_percentage": abs((results_2['wer'] - results_1['wer']) / results_1['wer'] * 100) if results_1['wer'] != 0 else 0
+            },
+            "rouge_1": {
+                "model_1": results_1['rouge-1'],
+                "model_2": results_2['rouge-1'],
+                "difference": results_2['rouge-1'] - results_1['rouge-1'],
+                "improvement": "model_2" if results_2['rouge-1'] > results_1['rouge-1'] else "model_1",
+                "improvement_percentage": abs((results_2['rouge-1'] - results_1['rouge-1']) / results_1['rouge-1'] * 100) if results_1['rouge-1'] != 0 else 0
+            },
+            "rouge_2": {
+                "model_1": results_1['rouge-2'],
+                "model_2": results_2['rouge-2'],
+                "difference": results_2['rouge-2'] - results_1['rouge-2'],
+                "improvement": "model_2" if results_2['rouge-2'] > results_1['rouge-2'] else "model_1",
+                "improvement_percentage": abs((results_2['rouge-2'] - results_1['rouge-2']) / results_1['rouge-2'] * 100) if results_1['rouge-2'] != 0 else 0
+            },
+            "rouge_l": {
+                "model_1": results_1['rouge-l'],
+                "model_2": results_2['rouge-l'],
+                "difference": results_2['rouge-l'] - results_1['rouge-l'],
+                "improvement": "model_2" if results_2['rouge-l'] > results_1['rouge-l'] else "model_1",
+                "improvement_percentage": abs((results_2['rouge-l'] - results_1['rouge-l']) / results_1['rouge-l'] * 100) if results_1['rouge-l'] != 0 else 0
+            },
+            "avg_time_per_sample_ms": {
+                "model_1": results_1['avg_time_per_sample'] * 1000,
+                "model_2": results_2['avg_time_per_sample'] * 1000,
+                "difference": (results_2['avg_time_per_sample'] - results_1['avg_time_per_sample']) * 1000,
+                "improvement": "model_1" if results_1['avg_time_per_sample'] < results_2['avg_time_per_sample'] else "model_2",
+                "speedup_factor": results_2['avg_time_per_sample'] / results_1['avg_time_per_sample'] if results_1['avg_time_per_sample'] != 0 else 0
+            },
+            "total_time_s": {
+                "model_1": results_1['total_time'],
+                "model_2": results_2['total_time'],
+                "difference": results_2['total_time'] - results_1['total_time'],
+                "improvement": "model_1" if results_1['total_time'] < results_2['total_time'] else "model_2",
+                "speedup_factor": results_2['total_time'] / results_1['total_time'] if results_1['total_time'] != 0 else 0
+            }
+        },
+        "summary": {
+            "better_accuracy_model": None,
+            "faster_model": None,
+            "overall_winner": None
+        }
+    }
+    
+    # Определяем лучшую модель по точности (средний балл по основным метрикам)
+    model_1_accuracy_score = (
+        (1 - results_1['cer']) +  # Чем меньше CER, тем лучше
+        (1 - results_1['wer']) +  # Чем меньше WER, тем лучше
+        results_1['rouge-2'] +     # Чем больше ROUGE, тем лучше
+        results_1['rouge-l']
+    ) / 4
+    
+    model_2_accuracy_score = (
+        (1 - results_2['cer']) +
+        (1 - results_2['wer']) +
+        results_2['rouge-2'] +
+        results_2['rouge-l']
+    ) / 4
+    
+    comparison_data["summary"]["better_accuracy_model"] = model_1_name if model_1_accuracy_score > model_2_accuracy_score else model_2_name
+    comparison_data["summary"]["faster_model"] = model_1_name if results_1['avg_time_per_sample'] < results_2['avg_time_per_sample'] else model_2_name
+    
+    # Определяем общего победителя (с весами: 70% точность, 30% скорость)
+    model_1_overall_score = model_1_accuracy_score * 0.7 + (1 / results_1['avg_time_per_sample']) * 0.3
+    model_2_overall_score = model_2_accuracy_score * 0.7 + (1 / results_2['avg_time_per_sample']) * 0.3
+    
+    comparison_data["summary"]["overall_winner"] = model_1_name if model_1_overall_score > model_2_overall_score else model_2_name
+    
+    # Сохраняем JSON файл
+    comparison_json_file = output_dir / "model_comparison.json"
+    with open(comparison_json_file, "w", encoding="utf-8") as f:
+        json.dump(comparison_data, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Данные сравнения сохранены в {comparison_json_file}")
     
     table = ax.table(cellText=data, loc='center', cellLoc='center', colWidths=[0.2, 0.2, 0.2, 0.2])
     
@@ -800,11 +1146,26 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
             cell.set_facecolor('#4472C4')
             cell.set_text_props(color='white', weight='bold')
         elif col == 3 and row > 0:  # Колонка разницы
-            diff_value = float(data[row][3]) if data[row][3] != '-' else 0
-            if diff_value < 0:
-                cell.set_facecolor('#C6EFCE')  # Зеленый для улучшения
-            elif diff_value > 0:
-                cell.set_facecolor('#FFC7CE')  # Красный для ухудшения
+            if data[row][3] == '-':
+                continue
+            
+            diff_value = float(data[row][3])
+            metric_name = data[row][0]
+            
+            # Для CER, WER: меньше = лучше (отрицательная разница = улучшение)
+            # Для ROUGE: больше = лучше (положительная разница = улучшение)
+            if metric_name in ['CER', 'WER', 'Avg Time (ms)', 'Total Time (s)']:
+                # Для этих метрик меньше = лучше
+                if diff_value < 0:
+                    cell.set_facecolor('#C6EFCE')  # Зеленый для улучшения
+                elif diff_value > 0:
+                    cell.set_facecolor('#FFC7CE')  # Красный для ухудшения
+            elif metric_name.startswith('ROUGE'):
+                # Для ROUGE метрик больше = лучше
+                if diff_value > 0:
+                    cell.set_facecolor('#C6EFCE')  # Зеленый для улучшения
+                elif diff_value < 0:
+                    cell.set_facecolor('#FFC7CE')  # Красный для ухудшения
         elif row % 2 == 0:
             cell.set_facecolor('#F2F2F2')
     
@@ -814,7 +1175,7 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
     
     logger.info(f"Таблица сравнения сохранена в {comparison_file}")
     
-    return comparison_file
+    return comparison_file, comparison_json_file
 
 
 def parse_arguments():
@@ -841,7 +1202,7 @@ def parse_arguments():
                         help="Директория для сохранения результатов")
     output_group.add_argument("--save_visualizations", action="store_true", default=True,
                         help="Сохранять визуализации результатов")
-    output_group.add_argument("--batch_size", type=int, default=80,
+    output_group.add_argument("--batch_size", type=int, default=1,
                         help="Размер пакета для инференса")
     
     # Режимы работы
@@ -854,7 +1215,7 @@ def parse_arguments():
                         help="Директория с данными для оценки датасета")
     mode_group.add_argument("--split", type=str, choices=["train", "valid", "test"], default="valid",
                         help="Раздел данных для оценки")
-    mode_group.add_argument("--num_samples", type=int, default=1000,
+    mode_group.add_argument("--num_samples", type=int, default=10000,
                         help="Количество образцов для оценки (если None, все доступные)")
     
     # Параметры сравнения моделей
@@ -1057,7 +1418,7 @@ def main():
             results_2['model_name'] = f"{args.model_type_2.upper()} Model 2"
             
             # Создаем таблицу сравнения
-            comparison_file = create_comparison_table(results_1, results_2, output_dir)
+            comparison_file, comparison_json_file = create_comparison_table(results_1, results_2, output_dir)
             
             logger.info(f"Сравнение моделей завершено. Таблица сохранена в {comparison_file}")
             

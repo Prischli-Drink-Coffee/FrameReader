@@ -28,6 +28,7 @@ dependencies = [
     "python-dotenv==1.0.1",
     "rich==13.9.4",
     "rouge>=1.0.1",
+    "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",
     "sentencepiece==0.2.0",
     "tensorboard==2.19.0",
@@ -39,6 +40,8 @@ dependencies = [
     "torchvision==0.22.0",
     "tqdm==4.67.1",
     "transformers>=4.52.4",
+    "typing-extensions>=4.14.0",
+    "ultralytics>=8.3.202",
     "zss>=1.2.0",
 ]
 

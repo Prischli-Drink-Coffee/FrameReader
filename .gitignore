@@ -30,3 +30,4 @@ TensorRT-Model-Optimizer/
 optimized_donut_output/
 
 output/
+runs/

@@ -1,0 +1,72 @@
+{
+  "metadata": {
+    "comparison_timestamp": "2025-09-20T00:31:53.047303",
+    "model_1": {
+      "name": "PyTorch Model",
+      "type": "PyTorch",
+      "samples": 40720
+    },
+    "model_2": {
+      "name": "TensorRT Model",
+      "type": "TensorRT",
+      "samples": 40720
+    }
+  },
+  "detection_metrics": {
+    "mAP50": {
+      "model_1": 0.9388652079166281,
+      "model_2": 0.939348148600589,
+      "difference": 0.0004829406839609307,
+      "improvement": "model_2",
+      "improvement_percentage": 0.051438766703538995
+    },
+    "mAP50-95": {
+      "model_1": 0.8991341442996161,
+      "model_2": 0.8899761483618518,
+      "difference": -0.00915799593776434,
+      "improvement": "model_1",
+      "improvement_percentage": 1.0185349979004519
+    },
+    "precision": {
+      "model_1": 0.9893595692272441,
+      "model_2": 0.984618883802917,
+      "difference": -0.004740685424327151,
+      "improvement": "model_1",
+      "improvement_percentage": 0.47916708664676316
+    },
+    "recall": {
+      "model_1": 0.8800076428252978,
+      "model_2": 0.8822877523724604,
+      "difference": 0.002280109547162623,
+      "improvement": "model_2",
+      "improvement_percentage": 0.25910110733155056
+    }
+  },
+  "performance_metrics": {
+    "avg_time_ms": {
+      "model_1": 13.998257141918938,
+      "model_2": 11.932224380712379,
+      "difference": -2.0660327612065603,
+      "improvement": "model_2",
+      "speedup_factor": 1.1731473273789723
+    },
+    "total_time_s": {
+      "model_1": 1313.327759027481,
+      "model_2": 1163.051852464676,
+      "difference": -150.27590656280518,
+      "improvement": "model_2"
+    },
+    "fps": {
+      "model_1": 71.43746466875632,
+      "model_2": 83.80667075088124,
+      "difference": 12.369206082124919,
+      "improvement": "model_2",
+      "speedup_factor": 1.1731473273789723
+    }
+  },
+  "summary": {
+    "better_accuracy_model": "PyTorch Model",
+    "faster_model": "TensorRT Model",
+    "overall_winner": "TensorRT Model"
+  }
+}

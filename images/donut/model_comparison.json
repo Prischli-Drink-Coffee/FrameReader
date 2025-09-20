@@ -1,0 +1,65 @@
+{
+  "metadata": {
+    "comparison_timestamp": "2025-09-19T10:48:00.818928",
+    "model_1_name": "PYTORCH Model 1",
+    "model_2_name": "TENSORRT Model 2",
+    "total_samples_model_1": 9235,
+    "total_samples_model_2": 9235
+  },
+  "metrics": {
+    "cer": {
+      "model_1": 0.6000056077682524,
+      "model_2": 0.7410078417095953,
+      "difference": 0.14100223394134292,
+      "improvement": "model_1",
+      "improvement_percentage": 23.500152684540236
+    },
+    "wer": {
+      "model_1": 0.8767810438956813,
+      "model_2": 0.8729503712667189,
+      "difference": -0.003830672628962417,
+      "improvement": "model_2",
+      "improvement_percentage": 0.436901853163033
+    },
+    "rouge_1": {
+      "model_1": 0.1058299837950307,
+      "model_2": 0.12167568213029348,
+      "difference": 0.01584569833526278,
+      "improvement": "model_2",
+      "improvement_percentage": 14.972787264101258
+    },
+    "rouge_2": {
+      "model_1": 0.003194969611480813,
+      "model_2": 0.005717487902463889,
+      "difference": 0.002522518290983076,
+      "improvement": "model_2",
+      "improvement_percentage": 78.95281012747826
+    },
+    "rouge_l": {
+      "model_1": 0.10565823684038762,
+      "model_2": 0.12131265018350854,
+      "difference": 0.015654413343120913,
+      "improvement": "model_2",
+      "improvement_percentage": 14.816084208152382
+    },
+    "avg_time_per_sample_ms": {
+      "model_1": 281.6855862002535,
+      "model_2": 31.80058393597151,
+      "difference": -249.885002264282,
+      "improvement": "model_2",
+      "speedup_factor": 0.11289389835291078
+    },
+    "total_time_s": {
+      "model_1": 2601.3663885593414,
+      "model_2": 293.6783926486969,
+      "difference": -2307.6879959106445,
+      "improvement": "model_2",
+      "speedup_factor": 0.11289389835291078
+    }
+  },
+  "summary": {
+    "better_accuracy_model": "PYTORCH Model 1",
+    "faster_model": "TENSORRT Model 2",
+    "overall_winner": "TENSORRT Model 2"
+  }
+}
