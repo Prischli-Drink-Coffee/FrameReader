@@ -131,8 +131,7 @@ class DonutInference:
         
         if dataloader is None:
             raise ValueError(f"Загрузчик данных для разделения '{split}' не найден")
-        
-        # Режим оценки
+
         self.model.eval()
         
         all_metrics = {
@@ -169,6 +168,9 @@ class DonutInference:
                 batch_start_time = time.time()
                 
                 pred_tokens = self.predict_batch(pixel_values)
+
+                print(f"pred_tokens: {pred_tokens}")
+                print(f"target_sequences: {target_sequences}")
                 
                 batch_inference_time = time.time() - batch_start_time
                 all_metrics["inference_times"].extend([batch_inference_time / batch_size] * batch_size)
@@ -470,13 +472,21 @@ class DonutInferenceTRT:
         self,
         tensorrt_dir: str,
         device: str = "cuda",
-        batch_size: int = 1
+        batch_size: int = 1,
+        temperature: float = 1.0,
+        top_k: int = 50
     ):
         self.tensorrt_dir = Path(tensorrt_dir)
         self.model_path = self.tensorrt_dir.parent
         self.device = device
         self.batch_size = batch_size
         self.config_path = self.tensorrt_dir / f"tensorrt_config.json"
+        self.temperature = temperature
+        self.top_k = top_k
+        
+        self._resources_initialized = False
+        self._cuda_context_valid = True
+        self._tensorrt_objects_valid = True
         
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
@@ -501,8 +511,15 @@ class DonutInferenceTRT:
         
         from transformers import DonutProcessor
         self.processor = DonutProcessor.from_pretrained(self.model_path)
-        self._init_tensorrt()
+        
+        self.encoder_engine = None
+        self.decoder_engine = None
+        self.encoder_context = None
+        self.decoder_context = None
+
         self.metrics_calculator = MetricsCalculator()
+        
+        self._init_tensorrt()
         logger.info(f"Инициализирован TensorRT инференс для {tensorrt_dir}")
     
     def _init_tensorrt(self):
@@ -609,20 +626,84 @@ class DonutInferenceTRT:
                 if 'logits' in name.lower() or i == 0:
                     self.decoder_output_name = name
                     self.decoder_output_shape = shape
+        
+        self._resources_initialized = True
     
+    def cleanup(self):
+        """Явное освобождение CUDA ресурсов."""
+        if not self._resources_initialized:
+            return
+            
+        try:
+            if self._cuda_context_valid:
+                try:
+                    self.cuda.Context.get_current()
+                    if hasattr(self, 'encoder_gpu_buffers'):
+                        for buffer in self.encoder_gpu_buffers.values():
+                            if buffer:
+                                buffer.free()
+                        self.encoder_gpu_buffers.clear()
+                    if hasattr(self, 'decoder_gpu_buffers'):
+                        for buffer in self.decoder_gpu_buffers.values():
+                            if buffer:
+                                buffer.free()
+                        self.decoder_gpu_buffers.clear()
+                    logger.info("CUDA буферы успешно освобождены")
+                except Exception as e:
+                    logger.warning(f"Ошибка при освобождении CUDA буферов: {e}")
+                    self._cuda_context_valid = False
+            if self._tensorrt_objects_valid:
+                try:
+                    if hasattr(self, 'encoder_context') and self.encoder_context is not None:
+                        del self.encoder_context
+                        self.encoder_context = None
+                    if hasattr(self, 'decoder_context') and self.decoder_context is not None:
+                        del self.decoder_context
+                        self.decoder_context = None
+                    if hasattr(self, 'encoder_engine') and self.encoder_engine is not None:
+                        del self.encoder_engine
+                        self.encoder_engine = None
+                    if hasattr(self, 'decoder_engine') and self.decoder_engine is not None:
+                        del self.decoder_engine
+                        self.decoder_engine = None
+                    logger.info("TensorRT объекты успешно освобождены")
+                except Exception as e:
+                    logger.warning(f"Ошибка при освобождении TensorRT объектов: {e}")
+                self._tensorrt_objects_valid = False
+            
+            if self._cuda_context_valid:
+                try:
+                    if hasattr(self, 'cuda_stream'):
+                        del self.cuda_stream
+                    logger.info("CUDA stream успешно освобожден")
+                except Exception as e:
+                    logger.warning(f"Ошибка при освобождении CUDA stream: {e}")
+            
+            self._cuda_context_valid = False
+            self._resources_initialized = False
+            logger.info("Все ресурсы успешно освобождены")
+            
+        except Exception as e:
+            logger.warning(f"Общая ошибка при освобождении ресурсов: {e}")
+            self._cuda_context_valid = False
+            self._tensorrt_objects_valid = False
+            self._resources_initialized = False
+
     def __del__(self):
         """Очистка ресурсов CUDA."""
         try:
-            if hasattr(self, 'encoder_gpu_buffers'):
-                for buffer in self.encoder_gpu_buffers.values():
-                    buffer.free()
-            if hasattr(self, 'decoder_gpu_buffers'):
-                for buffer in self.decoder_gpu_buffers.values():
-                    buffer.free()
-            if hasattr(self, 'cuda_stream'):
-                del self.cuda_stream
+            if self._resources_initialized:
+                self.cleanup()
         except Exception as e:
-            logger.warning(f"Ошибка при освобождении CUDA ресурсов: {e}")
+            pass
+    
+    def __enter__(self):
+        """Поддержка context manager."""
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Поддержка context manager."""
+        self.cleanup()
 
     def _set_binding_shapes(self, context, binding_shapes):
         """Устанавливает формы binding для контекста."""
@@ -673,30 +754,14 @@ class DonutInferenceTRT:
             try:
                 logits = self._run_decoder(encoder_outputs, decoder_input_ids)
                 next_token_logits = logits[0, -1, :]
-                
-                temperature = 1.0
-                top_k = 50
-                
-                next_token_logits = next_token_logits / temperature
-                top_k_indices = np.argpartition(next_token_logits, -top_k)[-top_k:]
+                next_token_logits = next_token_logits / self.temperature
+                top_k_indices = np.argpartition(next_token_logits, -self.top_k)[-self.top_k:]
                 top_k_logits = next_token_logits[top_k_indices]
                 exp_logits = np.exp(top_k_logits - np.max(top_k_logits))
                 probs = exp_logits / np.sum(exp_logits)
-    
-                if step < 3:
-                    next_token_idx = np.argmax(probs)
-                else:
-                    next_token_idx = np.random.choice(len(probs), p=probs)
-                
+                next_token_idx = np.argmax(probs)            
                 next_token_id = int(top_k_indices[next_token_idx])
-                
-                if step < 5:
-                    top_5_indices = np.argsort(next_token_logits)[-5:][::-1]
-                    top_5_logits = next_token_logits[top_5_indices]
-                    top_5_tokens = [self.processor.tokenizer.convert_ids_to_tokens(int(idx)) for idx in top_5_indices]
-                    # logger.info(f"Step {step}: top 5 tokens: {list(zip(top_5_tokens, top_5_indices, top_5_logits))}")
-                    # logger.info(f"Step {step}: selected token_id={next_token_id}, token='{self.processor.tokenizer.convert_ids_to_tokens(next_token_id)}'")
-                
+    
                 if next_token_id == eos_token_id:
                     # logger.info(f"Встретили EOS токен на шаге {step}")
                     break
@@ -713,12 +778,6 @@ class DonutInferenceTRT:
                 
                 new_input = np.array([[next_token_id]], dtype=np.int32)
                 decoder_input_ids = np.concatenate([decoder_input_ids, new_input], axis=1)
-                
-                max_context_len = 64
-                if decoder_input_ids.shape[1] > max_context_len:
-                    start_part = decoder_input_ids[:, :1]
-                    end_part = decoder_input_ids[:, -(max_context_len-1):]
-                    decoder_input_ids = np.concatenate([start_part, end_part], axis=1)
                     
             except Exception as e:
                 logger.error(f"Ошибка на шаге {step}: {e}")
@@ -1126,7 +1185,7 @@ def parse_arguments():
                         help="Директория с данными для оценки датасета")
     mode_group.add_argument("--split", type=str, choices=["train", "valid", "test"], default="valid",
                         help="Раздел данных для оценки")
-    mode_group.add_argument("--num_samples", type=int, default=10000,
+    mode_group.add_argument("--num_samples", type=int, default=10,
                         help="Количество образцов для оценки (если None, все доступные)")
     
     # Параметры сравнения моделей
