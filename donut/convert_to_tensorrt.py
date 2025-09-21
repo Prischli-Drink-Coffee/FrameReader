@@ -149,7 +149,7 @@ def convert_model_to_tensorrt(
     max_batch_size: int = 1
 ):
     """Полная конвертация модели в TensorRT."""
-    output_dir = Path(model_path) / f"eninge"
+    output_dir = Path(model_path) / f"engine"
     output_dir.mkdir(parents=True, exist_ok=True)
 
     config_path = Path(model_path) / "config.json"
