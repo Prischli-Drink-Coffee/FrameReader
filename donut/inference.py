@@ -510,6 +510,7 @@ class DonutInferenceTRT:
         try:
             import tensorrt as trt
             import pycuda.driver as cuda
+            import pycuda.autoinit
             self.cuda = cuda
             self.cuda_available = True
             self.trt = trt
