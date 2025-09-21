@@ -168,9 +168,6 @@ class DonutInference:
                 batch_start_time = time.time()
                 
                 pred_tokens = self.predict_batch(pixel_values)
-
-                print(f"pred_tokens: {pred_tokens}")
-                print(f"target_sequences: {target_sequences}")
                 
                 batch_inference_time = time.time() - batch_start_time
                 all_metrics["inference_times"].extend([batch_inference_time / batch_size] * batch_size)
@@ -721,7 +718,6 @@ class DonutInferenceTRT:
             try:
                 encoder_outputs = self._run_encoder(pixel_values[i:i+1])
                 pred = self._generate_single(encoder_outputs)
-                logger.info(f"Предсказание для изображения {i}: {pred}")
                 predictions.append(pred)
             except Exception as e:
                 logger.error(f"Ошибка при генерации для изображения {i}: {e}")
@@ -739,8 +735,6 @@ class DonutInferenceTRT:
                     self.decoder_start_token_id = self.processor.tokenizer.bos_token_id
             except:
                 self.decoder_start_token_id = self.processor.tokenizer.bos_token_id
-        
-        # logger.info(f"Используем decoder_start_token_id: {decoder_start_token_id}")
         
         decoder_input_ids = np.array([[self.decoder_start_token_id]], dtype=np.int32)
         
@@ -1185,7 +1179,7 @@ def parse_arguments():
                         help="Директория с данными для оценки датасета")
     mode_group.add_argument("--split", type=str, choices=["train", "valid", "test"], default="valid",
                         help="Раздел данных для оценки")
-    mode_group.add_argument("--num_samples", type=int, default=10,
+    mode_group.add_argument("--num_samples", type=int, default=9235,
                         help="Количество образцов для оценки (если None, все доступные)")
     
     # Параметры сравнения моделей

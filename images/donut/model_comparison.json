@@ -1,6 +1,6 @@
 {
   "metadata": {
-    "comparison_timestamp": "2025-09-19T10:48:00.818928",
+    "comparison_timestamp": "2025-09-21T21:22:37.534179",
     "model_1_name": "PYTORCH Model 1",
     "model_2_name": "TENSORRT Model 2",
     "total_samples_model_1": 9235,
@@ -9,52 +9,52 @@
   "metrics": {
     "cer": {
       "model_1": 0.6000056077682524,
-      "model_2": 0.7410078417095953,
-      "difference": 0.14100223394134292,
+      "model_2": 0.7305590726498433,
+      "difference": 0.13055346488159092,
       "improvement": "model_1",
-      "improvement_percentage": 23.500152684540236
+      "improvement_percentage": 21.758707450617063
     },
     "wer": {
       "model_1": 0.8767810438956813,
-      "model_2": 0.8729503712667189,
-      "difference": -0.003830672628962417,
+      "model_2": 0.865516984104041,
+      "difference": -0.011264059791640357,
       "improvement": "model_2",
-      "improvement_percentage": 0.436901853163033
+      "improvement_percentage": 1.2847061270385478
     },
     "rouge_1": {
       "model_1": 0.1058299837950307,
-      "model_2": 0.12167568213029348,
-      "difference": 0.01584569833526278,
+      "model_2": 0.1255771075881817,
+      "difference": 0.019747123793150995,
       "improvement": "model_2",
-      "improvement_percentage": 14.972787264101258
+      "improvement_percentage": 18.65929019832112
     },
     "rouge_2": {
       "model_1": 0.003194969611480813,
-      "model_2": 0.005717487902463889,
-      "difference": 0.002522518290983076,
+      "model_2": 0.006136919849251941,
+      "difference": 0.002941950237771128,
       "improvement": "model_2",
-      "improvement_percentage": 78.95281012747826
+      "improvement_percentage": 92.08069545323735
     },
     "rouge_l": {
       "model_1": 0.10565823684038762,
-      "model_2": 0.12131265018350854,
-      "difference": 0.015654413343120913,
+      "model_2": 0.12528030362218612,
+      "difference": 0.019622066781798495,
       "improvement": "model_2",
-      "improvement_percentage": 14.816084208152382
+      "improvement_percentage": 18.571260858195586
     },
     "avg_time_per_sample_ms": {
-      "model_1": 281.6855862002535,
-      "model_2": 31.80058393597151,
-      "difference": -249.885002264282,
+      "model_1": 218.90015527242963,
+      "model_2": 19.764451639808446,
+      "difference": -199.1357036326212,
       "improvement": "model_2",
-      "speedup_factor": 0.11289389835291078
+      "speedup_factor": 0.09028980182865028
     },
     "total_time_s": {
-      "model_1": 2601.3663885593414,
-      "model_2": 293.6783926486969,
-      "difference": -2307.6879959106445,
+      "model_1": 2021.5429339408875,
+      "model_2": 182.52471089363098,
+      "difference": -1839.0182230472565,
       "improvement": "model_2",
-      "speedup_factor": 0.11289389835291078
+      "speedup_factor": 0.09028980182865028
     }
   },
   "summary": {
