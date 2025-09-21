@@ -15,7 +15,6 @@ import seaborn as sns
 import torch
 from PIL import Image
 from tqdm.auto import tqdm
-from transformers import DonutProcessor
 
 from model import DonutModel
 from dataset import DonutDataModule
@@ -474,38 +473,36 @@ class DonutInferenceTRT:
         batch_size: int = 1
     ):
         self.tensorrt_dir = Path(tensorrt_dir)
+        self.model_path = self.tensorrt_dir.parent
         self.device = device
         self.batch_size = batch_size
-        
         self.config_path = self.tensorrt_dir / f"tensorrt_config.json"
-        self.encoder_engine_path = self.tensorrt_dir / f"model_encoder.engine"
-        self.decoder_engine_path = self.tensorrt_dir / f"model_decoder.engine"
         
         if not self.config_path.exists():
             raise FileNotFoundError(f"Config file not found: {self.config_path}")
+
+        with open(self.config_path, 'r', encoding='utf-8') as f:
+            self.config = json.load(f)
+        
+        self.base_name = self.config.get('base_name', 'donut')
+        self.task_start_token = self.config['task_start_token']
+        self.decoder_start_token_id = self.config.get('decoder_start_token_id')
+        self.prompt_end_token = self.config.get('prompt_end_token', self.task_start_token)
+        self.max_length = self.config['max_length']
+        self.image_size = tuple(self.config['image_size'])
+
+        self.encoder_engine_path = self.tensorrt_dir / f"{self.base_name}_encoder.engine"
+        self.decoder_engine_path = self.tensorrt_dir / f"{self.base_name}_decoder.engine"
+        
         if not self.encoder_engine_path.exists():
             raise FileNotFoundError(f"Encoder engine not found: {self.encoder_engine_path}")
         if not self.decoder_engine_path.exists():
             raise FileNotFoundError(f"Decoder engine not found: {self.decoder_engine_path}")
         
-        # Загружаем конфигурацию
-        with open(self.config_path, 'r', encoding='utf-8') as f:
-            self.config = json.load(f)
-        
-        self.task_start_token = self.config['task_start_token']
-        self.prompt_end_token = self.config.get('prompt_end_token', self.task_start_token)
-        self.max_length = self.config['max_length']
-        self.image_size = tuple(self.config['image_size'])
-        
-        # Создаем процессор
         from transformers import DonutProcessor
-        self.processor = DonutProcessor.from_pretrained(self.config['model_path'])
-        
-        # Инициализируем TensorRT
+        self.processor = DonutProcessor.from_pretrained(self.model_path)
         self._init_tensorrt()
-        
         self.metrics_calculator = MetricsCalculator()
-        
         logger.info(f"Инициализирован TensorRT инференс для {tensorrt_dir}")
     
     def _init_tensorrt(self):
@@ -513,12 +510,9 @@ class DonutInferenceTRT:
         try:
             import tensorrt as trt
             import pycuda.driver as cuda
-            import pycuda.autoinit
-            
             self.cuda = cuda
             self.cuda_available = True
             self.trt = trt
-            
         except ImportError as e:
             logger.error(f"Не удалось импортировать TensorRT или PyCUDA: {e}")
             raise ImportError("TensorRT или PyCUDA не установлены")
@@ -526,13 +520,11 @@ class DonutInferenceTRT:
         TRT_LOGGER = trt.Logger(trt.Logger.INFO)
         runtime = trt.Runtime(TRT_LOGGER)
         
-        # Загружаем encoder engine
         with open(self.encoder_engine_path, 'rb') as f:
             encoder_engine_data = f.read()
         self.encoder_engine = runtime.deserialize_cuda_engine(encoder_engine_data)
         self.encoder_context = self.encoder_engine.create_execution_context()
         
-        # Загружаем decoder engine
         with open(self.decoder_engine_path, 'rb') as f:
             decoder_engine_data = f.read()
         self.decoder_engine = runtime.deserialize_cuda_engine(decoder_engine_data)
@@ -540,14 +532,12 @@ class DonutInferenceTRT:
         
         logger.info(f"TensorRT engines loaded")
         
-        # Создаем CUDA stream
         self.cuda_stream = cuda.Stream()
         
-        # Получаем информацию о тензорах для encoder
         self.encoder_inputs = {}
         self.encoder_outputs = {}
         self.encoder_buffers = {}
-        self.encoder_gpu_buffers = {}  # GPU buffers
+        self.encoder_gpu_buffers = {}
         
         for i in range(self.encoder_engine.num_io_tensors):
             name = self.encoder_engine.get_tensor_name(i)
@@ -567,25 +557,21 @@ class DonutInferenceTRT:
                 if 'pixel_values' in name.lower() or i == 0:
                     self.encoder_input_name = name
                     self.encoder_input_shape = shape
-                # Создаем GPU буфер для входа
                 size = int(np.prod(shape) * np.dtype(np.float32).itemsize)
                 gpu_buffer = cuda.mem_alloc(size)
                 self.encoder_gpu_buffers[name] = gpu_buffer
                 self.encoder_buffers[name] = np.empty(shape, dtype=np.float32)
             else:
                 self.encoder_outputs[name] = tensor_info
-                # Создаем буферы для всех выходов
                 size = int(np.prod(shape) * np.dtype(np.float32).itemsize)
                 gpu_buffer = cuda.mem_alloc(size)
                 self.encoder_gpu_buffers[name] = gpu_buffer
                 self.encoder_buffers[name] = np.empty(shape, dtype=np.float32)
                 
-                # Определяем основной выход (encoder_outputs)
                 if 'encoder_outputs' in name.lower() or 'hidden' in name.lower():
                     self.encoder_output_name = name
                     self.encoder_output_shape = shape
         
-        # Получаем информацию о тензорах для decoder
         self.decoder_inputs = {}
         self.decoder_outputs = {}
         self.decoder_gpu_buffers = {}
@@ -619,7 +605,6 @@ class DonutInferenceTRT:
                 }
                 self.decoder_outputs[name] = tensor_info
                 
-                # Определяем основной выход (logits)
                 if 'logits' in name.lower() or i == 0:
                     self.decoder_output_name = name
                     self.decoder_output_shape = shape
@@ -627,20 +612,14 @@ class DonutInferenceTRT:
     def __del__(self):
         """Очистка ресурсов CUDA."""
         try:
-            # Освобождаем GPU буферы encoder
             if hasattr(self, 'encoder_gpu_buffers'):
                 for buffer in self.encoder_gpu_buffers.values():
                     buffer.free()
-            
-            # Освобождаем GPU буферы decoder  
             if hasattr(self, 'decoder_gpu_buffers'):
                 for buffer in self.decoder_gpu_buffers.values():
                     buffer.free()
-                    
-            # Освобождаем stream
             if hasattr(self, 'cuda_stream'):
                 del self.cuda_stream
-                
         except Exception as e:
             logger.warning(f"Ошибка при освобождении CUDA ресурсов: {e}")
 
@@ -658,14 +637,10 @@ class DonutInferenceTRT:
         
         for i in range(batch_size):
             try:
-                # Получаем encoder outputs
                 encoder_outputs = self._run_encoder(pixel_values[i:i+1])
-                
-                # Генерируем последовательность
                 pred = self._generate_single(encoder_outputs)
-                # logger.info(f"Предсказание для изображения {i}: {pred}")
+                logger.info(f"Предсказание для изображения {i}: {pred}")
                 predictions.append(pred)
-                
             except Exception as e:
                 logger.error(f"Ошибка при генерации для изображения {i}: {e}")
                 predictions.append("")
@@ -674,69 +649,46 @@ class DonutInferenceTRT:
     
     def _generate_single(self, encoder_outputs: np.ndarray) -> str:
         """Генерирует предсказание для одного изображения."""
-        import numpy as np
         
-        # Получаем правильный стартовый токен - используем decoder_start_token_id из конфигурации
-        decoder_start_token_id = self.config.get('decoder_start_token_id')
-        
-        if decoder_start_token_id is None:
-            # Fallback: пытаемся найти правильный токен
-            task_start_token = self.config.get('task_start_token', '<s_500k>')
+        if self.decoder_start_token_id is None:
             try:
-                decoder_start_token_id = self.processor.tokenizer.convert_tokens_to_ids(task_start_token)
-                if decoder_start_token_id == self.processor.tokenizer.unk_token_id:
-                    # Если не найден, используем bos_token_id
-                    decoder_start_token_id = self.processor.tokenizer.bos_token_id
+                self.decoder_start_token_id = self.processor.tokenizer.convert_tokens_to_ids(self.task_start_token)
+                if self.decoder_start_token_id == self.processor.tokenizer.unk_token_id:
+                    self.decoder_start_token_id = self.processor.tokenizer.bos_token_id
             except:
-                decoder_start_token_id = self.processor.tokenizer.bos_token_id
+                self.decoder_start_token_id = self.processor.tokenizer.bos_token_id
         
         # logger.info(f"Используем decoder_start_token_id: {decoder_start_token_id}")
         
-        # Инициализируем вход decoder с правильным стартовым токеном
-        decoder_input_ids = np.array([[decoder_start_token_id]], dtype=np.int32)
+        decoder_input_ids = np.array([[self.decoder_start_token_id]], dtype=np.int32)
         
         generated_tokens = []
         max_length = self.max_length
         
-        # Получаем токены для остановки генерации
         eos_token_id = self.processor.tokenizer.eos_token_id
         pad_token_id = getattr(self.processor.tokenizer, 'pad_token_id', None)
         
-        # logger.info(f"Начинаем генерацию, max_length: {max_length}, eos_id: {eos_token_id}, pad_id: {pad_token_id}")
-        
         for step in range(max_length):
             try:
-                # Запускаем decoder
                 logits = self._run_decoder(encoder_outputs, decoder_input_ids)
-
-                # Получаем следующий токен
                 next_token_logits = logits[0, -1, :]
                 
-                # Применяем temperature и top-k sampling для разнообразия
                 temperature = 1.0
                 top_k = 50
                 
-                # Применяем temperature
                 next_token_logits = next_token_logits / temperature
-                
-                # Top-k фильтрация
                 top_k_indices = np.argpartition(next_token_logits, -top_k)[-top_k:]
                 top_k_logits = next_token_logits[top_k_indices]
-                
-                # Softmax для получения вероятностей
                 exp_logits = np.exp(top_k_logits - np.max(top_k_logits))
                 probs = exp_logits / np.sum(exp_logits)
-                
-                # Выбираем токен на основе вероятностей (с небольшой рандомностью)
-                if step < 3:  # Первые несколько токенов берем наиболее вероятные
+    
+                if step < 3:
                     next_token_idx = np.argmax(probs)
                 else:
-                    # Добавляем немного рандомности
                     next_token_idx = np.random.choice(len(probs), p=probs)
                 
                 next_token_id = int(top_k_indices[next_token_idx])
                 
-                # Выводим отладочную информацию для первых шагов
                 if step < 5:
                     top_5_indices = np.argsort(next_token_logits)[-5:][::-1]
                     top_5_logits = next_token_logits[top_5_indices]
@@ -744,7 +696,6 @@ class DonutInferenceTRT:
                     # logger.info(f"Step {step}: top 5 tokens: {list(zip(top_5_tokens, top_5_indices, top_5_logits))}")
                     # logger.info(f"Step {step}: selected token_id={next_token_id}, token='{self.processor.tokenizer.convert_ids_to_tokens(next_token_id)}'")
                 
-                # Проверяем на токены остановки
                 if next_token_id == eos_token_id:
                     # logger.info(f"Встретили EOS токен на шаге {step}")
                     break
@@ -753,34 +704,28 @@ class DonutInferenceTRT:
                     # logger.info(f"Встретили PAD токен на шаге {step}")
                     break
                 
-                # Проверяем на зацикливание (если последние 3 токена одинаковые)
                 if len(generated_tokens) >= 3 and all(t == next_token_id for t in generated_tokens[-3:]):
                     # logger.warning(f"Обнаружено зацикливание на токене {next_token_id}, останавливаем генерацию")
                     break
                 
                 generated_tokens.append(next_token_id)
                 
-                # Обновляем вход decoder
                 new_input = np.array([[next_token_id]], dtype=np.int32)
                 decoder_input_ids = np.concatenate([decoder_input_ids, new_input], axis=1)
                 
-                # Обрезаем если слишком длинная последовательность (оставляем окно контекста)
-                max_context_len = 64  # Уменьшаем контекст для стабильности
+                max_context_len = 64
                 if decoder_input_ids.shape[1] > max_context_len:
-                    # Сохраняем стартовый токен и последние токены
-                    start_part = decoder_input_ids[:, :1]  # Стартовый токен
-                    end_part = decoder_input_ids[:, -(max_context_len-1):]  # Последние токены
+                    start_part = decoder_input_ids[:, :1]
+                    end_part = decoder_input_ids[:, -(max_context_len-1):]
                     decoder_input_ids = np.concatenate([start_part, end_part], axis=1)
                     
             except Exception as e:
                 logger.error(f"Ошибка на шаге {step}: {e}")
                 break
         
-        # Декодируем токены
         if generated_tokens:
             try:
                 pred_text = self.processor.tokenizer.decode(generated_tokens, skip_special_tokens=True)
-                # Очищаем текст от артефактов
                 pred_text = pred_text.strip()
             except Exception as e:
                 logger.error(f"Ошибка при декодировании токенов: {e}")
@@ -796,36 +741,26 @@ class DonutInferenceTRT:
     
     def _run_encoder(self, pixel_values: np.ndarray) -> np.ndarray:
         """Запуск encoder через TensorRT."""
-        import numpy as np
-        
-        # Подготавливаем входные данные
         if pixel_values.shape != self.encoder_input_shape:
             pixel_values = pixel_values.reshape(self.encoder_input_shape)
-        
-        # Убеждаемся, что данные в правильном формате
         pixel_values = pixel_values.astype(np.float32)
         
         try:
-            # Копируем входные данные в GPU
             self.cuda.memcpy_htod_async(
                 self.encoder_gpu_buffers[self.encoder_input_name], 
                 pixel_values, 
                 self.cuda_stream
             )
             
-            # Устанавливаем адреса тензоров на GPU буферы
             for name, gpu_buffer in self.encoder_gpu_buffers.items():
                 self.encoder_context.set_tensor_address(name, int(gpu_buffer))
             
-            # Запускаем inference
             success = self.encoder_context.execute_async_v3(self.cuda_stream.handle)
             if not success:
                 raise RuntimeError("Encoder inference failed")
             
-            # Синхронизируем stream
             self.cuda_stream.synchronize()
             
-            # Копируем результат обратно в CPU
             output_buffer = self.encoder_buffers[self.encoder_output_name]
             self.cuda.memcpy_dtoh_async(
                 output_buffer, 
@@ -842,28 +777,18 @@ class DonutInferenceTRT:
     
     def _run_decoder(self, encoder_outputs: np.ndarray, decoder_input_ids: np.ndarray) -> np.ndarray:
         """Запуск decoder через TensorRT."""
-        import numpy as np
-        
-        # Подготавливаем входные данные
         encoder_outputs = encoder_outputs.astype(np.float32)
         decoder_input_ids = decoder_input_ids.astype(np.int32)
-        
-        # Обновляем динамические размеры
-        current_seq_len = decoder_input_ids.shape[1]
-        
-        # Устанавливаем формы для динамических размеров
         self.decoder_context.set_input_shape(self.decoder_input_ids_name, decoder_input_ids.shape)
         
-        # Создаем GPU буферы для этого вызова (для динамических размеров)
         decoder_gpu_buffers = {}
         decoder_cpu_buffers = {}
         
-        # Входные буферы
         for name, tensor_info in self.decoder_inputs.items():
             if name == self.decoder_input_ids_name:
                 shape = decoder_input_ids.shape
                 data = decoder_input_ids
-            else:  # encoder hidden states
+            else:
                 shape = encoder_outputs.shape
                 data = encoder_outputs
             
@@ -871,10 +796,8 @@ class DonutInferenceTRT:
             gpu_buffer = self.cuda.mem_alloc(size)
             decoder_gpu_buffers[name] = gpu_buffer
             
-            # Копируем данные в GPU
             self.cuda.memcpy_htod_async(gpu_buffer, data, self.cuda_stream)
         
-        # Выходные буферы
         for name, tensor_info in self.decoder_outputs.items():
             actual_shape = self.decoder_context.get_tensor_shape(name)
             size = int(np.prod(actual_shape) * np.dtype(tensor_info['dtype']).itemsize)
@@ -883,19 +806,15 @@ class DonutInferenceTRT:
             decoder_cpu_buffers[name] = np.empty(actual_shape, dtype=tensor_info['dtype'])
         
         try:
-            # Устанавливаем адреса тензоров
             for name, gpu_buffer in decoder_gpu_buffers.items():
                 self.decoder_context.set_tensor_address(name, int(gpu_buffer))
             
-            # Запускаем inference
             success = self.decoder_context.execute_async_v3(self.cuda_stream.handle)
             if not success:
                 raise RuntimeError("Decoder inference failed")
             
-            # Синхронизируем stream
             self.cuda_stream.synchronize()
             
-            # Копируем результат обратно в CPU
             output_buffer = decoder_cpu_buffers[self.decoder_output_name]
             self.cuda.memcpy_dtoh_async(
                 output_buffer, 
@@ -907,7 +826,6 @@ class DonutInferenceTRT:
             return output_buffer.copy()
             
         finally:
-            # Освобождаем временные GPU буферы
             for buffer in decoder_gpu_buffers.values():
                 buffer.free()
     
@@ -1018,7 +936,6 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
     fig, ax = plt.subplots(figsize=(12, 8))
     ax.axis('off')
     
-    # Данные для таблицы
     metrics = ['CER', 'WER', 'ROUGE-2', 'ROUGE-L', 'Avg Time (ms)', 'Total Time (s)']
     
     model_1_name = results_1.get('model_name', 'Model 1')
@@ -1036,7 +953,6 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
         ['Samples', str(results_1['num_samples']), str(results_2['num_samples']), '-']
     ]
     
-    # Создаем структурированные данные для JSON
     comparison_data = {
         "metadata": {
             "comparison_timestamp": datetime.now().isoformat(),
@@ -1103,7 +1019,6 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
         }
     }
     
-    # Определяем лучшую модель по точности (средний балл по основным метрикам)
     model_1_accuracy_score = (
         (1 - results_1['cer']) +  # Чем меньше CER, тем лучше
         (1 - results_1['wer']) +  # Чем меньше WER, тем лучше
@@ -1121,13 +1036,11 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
     comparison_data["summary"]["better_accuracy_model"] = model_1_name if model_1_accuracy_score > model_2_accuracy_score else model_2_name
     comparison_data["summary"]["faster_model"] = model_1_name if results_1['avg_time_per_sample'] < results_2['avg_time_per_sample'] else model_2_name
     
-    # Определяем общего победителя (с весами: 70% точность, 30% скорость)
     model_1_overall_score = model_1_accuracy_score * 0.7 + (1 / results_1['avg_time_per_sample']) * 0.3
     model_2_overall_score = model_2_accuracy_score * 0.7 + (1 / results_2['avg_time_per_sample']) * 0.3
     
     comparison_data["summary"]["overall_winner"] = model_1_name if model_1_overall_score > model_2_overall_score else model_2_name
     
-    # Сохраняем JSON файл
     comparison_json_file = output_dir / "model_comparison.json"
     with open(comparison_json_file, "w", encoding="utf-8") as f:
         json.dump(comparison_data, f, indent=2, ensure_ascii=False)
@@ -1140,12 +1053,11 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
     table.set_fontsize(12)
     table.scale(1.5, 2.0)
     
-    # Стилизация
     for (row, col), cell in table.get_celld().items():
         if row == 0:
             cell.set_facecolor('#4472C4')
             cell.set_text_props(color='white', weight='bold')
-        elif col == 3 and row > 0:  # Колонка разницы
+        elif col == 3 and row > 0:
             if data[row][3] == '-':
                 continue
             
@@ -1155,13 +1067,11 @@ def create_comparison_table(results_1: Dict[str, Any], results_2: Dict[str, Any]
             # Для CER, WER: меньше = лучше (отрицательная разница = улучшение)
             # Для ROUGE: больше = лучше (положительная разница = улучшение)
             if metric_name in ['CER', 'WER', 'Avg Time (ms)', 'Total Time (s)']:
-                # Для этих метрик меньше = лучше
                 if diff_value < 0:
                     cell.set_facecolor('#C6EFCE')  # Зеленый для улучшения
                 elif diff_value > 0:
                     cell.set_facecolor('#FFC7CE')  # Красный для ухудшения
             elif metric_name.startswith('ROUGE'):
-                # Для ROUGE метрик больше = лучше
                 if diff_value > 0:
                     cell.set_facecolor('#C6EFCE')  # Зеленый для улучшения
                 elif diff_value < 0:
@@ -1343,7 +1253,6 @@ def main():
             return 1
         
         try:
-            # Загружаем первую модель
             if args.model_type_1 == "pytorch":
                 model_1 = setup_model(args)
                 inference_1 = DonutInference(
@@ -1363,7 +1272,6 @@ def main():
                     batch_size=args.batch_size
                 )
             
-            # Загружаем вторую модель
             args_temp = args
             args_temp.model_path = args.model_path_2
             if args.model_type_2 == "pytorch":
@@ -1385,7 +1293,6 @@ def main():
                     batch_size=args.batch_size
                 )
             
-            # Оцениваем обе модели
             data_module = DonutDataModule(
                 processor=model_1.processor if args.model_type_1 == "pytorch" else inference_1.processor,
                 data_dir=args.data_dir,
@@ -1417,7 +1324,6 @@ def main():
             )
             results_2['model_name'] = f"{args.model_type_2.upper()} Model 2"
             
-            # Создаем таблицу сравнения
             comparison_file, comparison_json_file = create_comparison_table(results_1, results_2, output_dir)
             
             logger.info(f"Сравнение моделей завершено. Таблица сохранена в {comparison_file}")

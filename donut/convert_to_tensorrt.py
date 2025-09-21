@@ -4,9 +4,8 @@ import json
 import logging
 import argparse
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Union, Any
+from typing import Tuple
 import torch
-from transformers import DonutProcessor
 
 from model import DonutModel
 
@@ -23,13 +22,9 @@ logger = logging.getLogger(__name__)
 def export_to_onnx(model: DonutModel, onnx_path: str, image_size: Tuple[int, int] = (1280, 960)):
     """Экспортирует модель Donut в формат ONNX."""
     logger.info("Экспорт модели в ONNX...")
-
-    # Создаем фиктивные входные данные
     dummy_image = torch.randn(1, 3, image_size[0], image_size[1])
     dummy_decoder_input_ids = torch.tensor([[model.model.config.decoder_start_token_id]], dtype=torch.long)
 
-    # Для VisionEncoderDecoderModel нужно экспортировать отдельно encoder и decoder
-    # Сначала encoder
     encoder_onnx_path = onnx_path.replace('.onnx', '_encoder.onnx')
     logger.info(f"Экспорт encoder в {encoder_onnx_path}")
 
@@ -44,11 +39,9 @@ def export_to_onnx(model: DonutModel, onnx_path: str, image_size: Tuple[int, int
         verbose=False
     )
 
-    # Получаем выход encoder для decoder
     with torch.no_grad():
         encoder_outputs = model.model.encoder(dummy_image)
 
-    # Decoder
     decoder_onnx_path = onnx_path.replace('.onnx', '_decoder.onnx')
     logger.info(f"Экспорт decoder в {decoder_onnx_path}")
 
@@ -79,29 +72,26 @@ def convert_onnx_to_tensorrt(onnx_path: str, engine_path: str, precision: str = 
 
     try:
         import tensorrt as trt
-        from tensorrt import Logger, Runtime
+        from tensorrt import Logger
     except ImportError:
         logger.error("TensorRT не установлен. Установите tensorrt: pip install tensorrt")
         return False
 
     TRT_LOGGER = Logger(trt.Logger.WARNING)
 
-    # Создаем builder
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH))
     parser = trt.OnnxParser(network, TRT_LOGGER)
 
-    # Парсим ONNX
     with open(onnx_path, 'rb') as f:
         if not parser.parse(f.read()):
             for error in range(parser.num_errors):
                 logger.error(parser.get_error(error))
             return False
 
-    # Создаем конфигурацию
+
     config = builder.create_builder_config()
 
-    # Создаем оптимизационный профиль для динамических входов
     profile = builder.create_optimization_profile()
     
     if 'encoder' in onnx_path:
@@ -139,17 +129,14 @@ def convert_onnx_to_tensorrt(onnx_path: str, engine_path: str, precision: str = 
     else:
         logger.info("Используется FP32 точность")
 
-    # Оптимизация
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)  # 1GB
 
-    # Строим engine
     serialized_engine = builder.build_serialized_network(network, config)
 
     if serialized_engine is None:
         logger.error("Не удалось создать TensorRT engine")
         return False
 
-    # Сохраняем engine
     with open(engine_path, 'wb') as f:
         f.write(serialized_engine)
 
@@ -159,14 +146,12 @@ def convert_onnx_to_tensorrt(onnx_path: str, engine_path: str, precision: str = 
 
 def convert_model_to_tensorrt(
     model_path: str,
-    output_dir: str,
     max_batch_size: int = 1
 ):
     """Полная конвертация модели в TensorRT."""
-    output_dir = Path(output_dir) / f"{Path(model_path).name}"
+    output_dir = Path(model_path) / f"eninge"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Загружаем параметры из чекпоинта
     config_path = Path(model_path) / "config.json"
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
@@ -187,30 +172,25 @@ def convert_model_to_tensorrt(
         max_length = 768
         model_precision = 'fp32'
     
-    # Определяем precision для TensorRT
     if model_precision == 'bf16':
         precision = 'fp16'
     else:
         precision = 'fp32'
 
-    # Загружаем модель
     logger.info(f"Загрузка модели из {model_path}")
     model = DonutModel.from_pretrained(
         model_path,
-        device='cpu',  # Для экспорта используем CPU
+        device='cpu',
         precision='fp32',
         max_length=max_length,
         image_size=image_size
     )
 
-    # Пути для файлов
-    base_name = 'model'
+    base_name = 'donut'
     onnx_path = output_dir / f"{base_name}.onnx"
     
-    # Экспорт в ONNX
     export_to_onnx(model, str(onnx_path), image_size)
 
-    # Конвертация encoder и decoder отдельно
     encoder_onnx_path = onnx_path.with_name(f"{base_name}_encoder.onnx")
     decoder_onnx_path = onnx_path.with_name(f"{base_name}_decoder.onnx")
     
@@ -224,19 +204,13 @@ def convert_model_to_tensorrt(
 
     if success:
         config = {
-            'model_path': model_path,
+            'base_name': base_name,
             'precision': precision,
             'image_size': image_size,
             'max_batch_size': max_batch_size,
             'hidden_size': hidden_size,
             'downsample_factor': downsample_factor,
             'max_length': max_length,
-            'onnx_path': str(onnx_path),
-            'encoder_onnx_path': str(encoder_onnx_path),
-            'decoder_onnx_path': str(decoder_onnx_path),
-            'engine_path': str(encoder_engine_path),
-            'encoder_engine_path': str(encoder_engine_path),
-            'decoder_engine_path': str(decoder_engine_path),
             'task_start_token': model.task_start_token,
             'prompt_end_token': model.prompt_end_token,
             'decoder_start_token_id': model.model.config.decoder_start_token_id
@@ -255,8 +229,6 @@ def main():
     parser = argparse.ArgumentParser(description="Конвертация модели Donut в TensorRT")
     parser.add_argument("--model_path", type=str, required=True,
                        help="Путь к модели Donut")
-    parser.add_argument("--output_dir", type=str, required=True,
-                       help="Директория для сохранения результатов")
     parser.add_argument("--max_batch_size", type=int, default=1,
                        help="Максимальный размер пакета")
 
@@ -264,7 +236,6 @@ def main():
 
     success = convert_model_to_tensorrt(
         args.model_path,
-        args.output_dir,
         args.max_batch_size
     )
 
