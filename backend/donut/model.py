@@ -102,21 +102,15 @@ class EngineFactory:
     @staticmethod
     def create_engine(args: Dict[str, Any], config: DonutConfig, device: torch.device) -> TRTInferenceEngine:
         model_directory = os.path.join(args["model_repository"], args["model_version"])
-        model_path = os.path.join(model_directory, "donut_fp16.pt")
-        processor_path = os.path.join(model_directory, "checkpoint")
+        tensorrt_dir = os.path.join(model_directory, "donut", "engine")
         
-        if not os.path.exists(model_path) or not os.path.exists(processor_path):
-            raise FileNotFoundError(f"Model files not found at {model_path} or {processor_path}")
+        if not os.path.exists(tensorrt_dir):
+            raise FileNotFoundError(f"Model files not found at {tensorrt_dir}")
         
-        return TRTInferenceEngine(
-            model_path=model_path,
-            processor_path=processor_path,
+        return DonutInferenceTRT(
+            tensorrt_dir=tensorrt_dir,
             device=device,
-            image_size=(config.image_width, config.image_height),
-            max_length=config.max_length,
-            num_beams=config.num_beams,
-            task_start_token=config.task_start_token,
-            prompt_end_token=config.prompt_end_token
+            batch_size=config.batch_size
         )
 
 

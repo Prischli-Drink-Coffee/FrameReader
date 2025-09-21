@@ -2,28 +2,41 @@ import torch
 from pathlib import Path
 from PIL import Image
 import numpy as np
-from donut.engine import TRTInferenceEngine
+from donut.engine import DonutInferenceTRT
+from transformers import DonutProcessor
+import io
 
 
 if __name__ == '__main__':
-    engine = TRTInferenceEngine(
-        model_path='/home/student/projects/TritonServer/models/donut/1/donut_fp16.pt',
-        processor_path='/home/student/projects/TritonServer/models/donut/1/checkpoint',
-        device=torch.device('cuda')
-    )
 
-    # Передача пути
-    engine.process_batch([Path('/home/student/projects/TritonServer/docs/test.jpg')])
+    model_path = Path('/home/student/projects/TritonServer/models/donut/1/donut')
+    tensorrt_dir = model_path / 'engine'
+    image_path = Path('/home/student/projects/TritonServer/docs/test.jpg')
+    image_size = (384, 384)
+    batch_size = 1
 
-    # Передача PIL
-    img = Image.open(Path('/home/student/projects/TritonServer/docs/test.jpg'))
-    imgs = [img]
-    engine.process_batch([imgs])
+    with DonutInferenceTRT(
+        tensorrt_dir=tensorrt_dir,
+        device='cuda' if torch.cuda.is_available() else 'cpu',
+        batch_size=batch_size
+    ) as engine:
 
-    # Передача тензора
-    img = Image.open(Path('/home/student/projects/TritonServer/docs/test.jpg')).convert('RGB')
-    img_np = np.array(img)
-    image_torch = torch.from_numpy(img_np).to('cuda')
-    if len(image_torch.shape) == 3:
-        image_torch = image_torch.permute(2, 0, 1)
-    engine.process_batch([image_torch])
+        processor = DonutProcessor.from_pretrained(model_path, use_fast=True)
+        processor.image_processor.size = image_size[::-1]
+        processor.image_processor.do_align_long_axis = False
+        
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+        image = Image.open(io.BytesIO(image_data)).convert("RGB")
+        image.thumbnail(image_size[::-1], Image.LANCZOS)
+
+        pixel_values = processor(
+            image, 
+            return_tensors="pt"
+        ).pixel_values
+        pixel_values = pixel_values.squeeze().unsqueeze(0)
+
+        predictions = engine.predict_batch(pixel_values)
+        
+        print(f"Predictions: {predictions}")
+

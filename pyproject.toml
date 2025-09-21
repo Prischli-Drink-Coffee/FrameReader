@@ -17,6 +17,7 @@ dependencies = [
     "opencv-python==4.11.0.86",
     "pillow==11.1.0",
     "protobuf==5.29.3",
+    "pycuda>=2025.1.2",
     "python-dotenv==1.0.1",
     "python-multipart>=0.0.20",
     "ray[serve]>=2.46.0",

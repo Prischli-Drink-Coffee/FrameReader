@@ -127,7 +127,7 @@ class ModelFactory:
         model_path = os.path.join(
             args["model_repository"], 
             args["model_version"], 
-            "yolo_int8.engine"
+            "yolo.engine"
         )
 
         if not os.path.exists(model_path):
