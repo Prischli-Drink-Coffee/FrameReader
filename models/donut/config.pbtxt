@@ -1,5 +1,5 @@
 backend: "donut"
-max_batch_size: 16
+max_batch_size: 1
 
 dynamic_batching {
  max_queue_delay_microseconds: 100000

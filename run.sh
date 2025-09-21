@@ -162,6 +162,9 @@ $RUN_PREFIX docker run --gpus all -d \
     -v ${SOURCE_DIR}:/workspace \
     -v${SOURCE_DIR}/.cache/huggingface:/root/.cache/huggingface \
     -v${SOURCE_DIR}/backend:/opt/tritonserver/backends/ \
+    -v${SOURCE_DIR}/backend/donut:/workspace/backend/donut \
+    -v${SOURCE_DIR}/backend/yolo:/workspace/backend/yolo \
+    -v${SOURCE_DIR}/backend/test_engine.py:/workspace/backend/test_engine.py \
     -w /workspace $IMAGE /bin/bash -c "
     source /opt/.venv/bin/activate &&
     cd /workspace &&

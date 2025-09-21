@@ -34,7 +34,6 @@ if __name__ == '__main__':
             image, 
             return_tensors="pt"
         ).pixel_values
-        pixel_values = pixel_values.squeeze().unsqueeze(0)
 
         predictions = engine.predict_batch(pixel_values)
         
