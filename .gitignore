@@ -30,3 +30,4 @@ yarn-error.log*
 /.vs/
 /node_modules/console-control-strings
 /client.esproj.user
+.env.development
