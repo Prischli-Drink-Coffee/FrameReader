@@ -25,10 +25,12 @@ class DonutConfig:
 
 class DonutProcessor:
     @staticmethod
-    def serialize_results(results: Any) -> List[Dict[str, Any]]:
-        if isinstance(results, list):
-            return results
-        return [{"text": str(results)}]
+    def serialize_results(results: list) -> List[Dict[str, Any]]:
+        result = []
+        for res in results:
+            pred_dict = {'text': res}
+            result.append(pred_dict)
+        return result
 
     @staticmethod
     def preprocess_images(image_data: np.ndarray) -> List[Image.Image]:
