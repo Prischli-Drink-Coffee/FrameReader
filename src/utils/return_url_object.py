@@ -1,8 +1,8 @@
 from fastapi.responses import FileResponse, JSONResponse
-from config import Config
-config = Config()
+from load_dotenv import load_dotenv
 
+load_dotenv()
 
 def return_url_object(url: str) -> str:
-    return (f"http://{config.__getattr__('HOST')}:{config.__getattr__('SERVER_PORT')}/"
+    return (f"http://{os.getenv('HOST')}:{os.getenv('SERVER_PORT')}/"
             f"public{url}")

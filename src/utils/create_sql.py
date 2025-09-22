@@ -1,31 +1,33 @@
 import os
 import pymysql
-from src.utils.custom_logging import setup_logging
-from src.utils.env import Env
+from src.utils.custom_logging import get_logger
+from load_dotenv import load_dotenv
 
-env = Env()
-log = setup_logging()
+
+load_dotenv()
+log = get_logger(__name__)
 
 
 class CreateSQL:
 
     def __init__(self):
-        self.path_to_sql = os.path.join(os.path.dirname(os.path.dirname(__file__)), f"{env.__getattr__('DB')}.sql")
+        self.path_to_sql = os.path.join(os.path.dirname(os.path.dirname(__file__)), f"{os.getenv('DB')}.sql")
 
         self.connection = pymysql.connect(
-            host=env.__getattr__("DB_HOST"),
-            port=int(env.__getattr__("DB_PORT")),
-            user=env.__getattr__("DB_USER"),
-            password=env.__getattr__("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            port=int(os.getenv("DB_PORT")),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
             charset='utf8mb4',
-            cursorclass=pymysql.cursors.DictCursor
+            cursorclass=pymysql.cursors.DictCursor,
+            connect_timeout=30
         )
 
     def read_sql(self):
         try:
             with self.connection.cursor() as cursor:
-                cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{env.__getattr__('DB')}`")
-                cursor.execute(f"USE `{env.__getattr__('DB')}`")
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{os.getenv('DB')}`")
+                cursor.execute(f"USE `{os.getenv('DB')}`")
 
                 with open(self.path_to_sql, "r", encoding="utf-8") as f:
                     sql_script = f.read()

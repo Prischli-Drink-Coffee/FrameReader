@@ -10,9 +10,9 @@ import numpy as np
 from PIL import Image
 
 from src.utils.custom_logging import get_logger
-from src.utils.env import Env
+from load_dotenv import load_dotenv
 
-env = Env()
+load_dotenv()
 log = get_logger(__name__)
 
 
@@ -24,7 +24,7 @@ class StreamEndpointClient:
         chunk_size: int = 1,
         max_chunk_size: int = 10
     ):
-        self.base_url = base_url or env.TRITON_API_URL
+        self.base_url = base_url or os.getenv("TRITON_API_URL")
         self.timeout = timeout
         self.chunk_size = min(chunk_size, max_chunk_size)
         self.max_chunk_size = max_chunk_size

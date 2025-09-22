@@ -1,21 +1,36 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env"
 
-echo "--- Building FrameReader Backend ---"
+echo "--- Building Services ---"
 
-echo "Running db.sh to initialize database..."
-if [ -f "$PROJECT_ROOT/db.sh" ]; then
-    bash "$PROJECT_ROOT/db.sh"
-    echo "db.sh executed successfully."
+unset APP_TAG
+
+mkdir -p "$PROJECT_ROOT/docker/logs"
+
+if [[ -f "$ENV_FILE" ]]; then
+    while IFS='=' read -r key value; do
+        if [[ -n $key && $key != '#'* ]]; then
+            key=$(echo "$key" | tr -d '\r')
+            value=$(echo "$value" | tr -d '\r')
+            export "$key"="$value"
+        fi
+    done < "$ENV_FILE"
 else
-    echo "Warning: db.sh not found at $PROJECT_ROOT/db.sh. Skipping database initialization."
+    echo "WARNING: .env file not found, using defaults"
 fi
 
-echo "Building Docker image for backend..."
-docker build -t framereader-backend:latest -f "$PROJECT_ROOT/docker/Dockerfile" "$PROJECT_ROOT"
+if [[ -z "${APP_TAG:-}" ]]; then
+  echo "ERROR: APP_TAG is not set in .env"
+  exit 1
+fi
 
-echo "Docker image framereader-backend:latest built successfully."
-echo "--- Build Complete ---"
+echo "Building Docker images..."
+docker-compose -f "$PROJECT_ROOT/docker/docker-compose.yml" build --build-arg APP_TAG="$APP_TAG" framereader-backend-app
+docker image prune -f
+docker system prune -f
+
+echo "--- Build completed successfully ---"

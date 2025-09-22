@@ -1,20 +1,21 @@
+import os
 import pymysql
 from pymysql.err import OperationalError
-from src.utils.env import Env
 from src.utils.custom_logging import get_logger
+from load_dotenv import load_dotenv
 
-env = Env()
+load_dotenv()
 log = get_logger(__name__)
 
 
 class Database:
     def __init__(self):
         self.connection = pymysql.connect(
-            host=env.__getattr__("DB_HOST"),
-            db=env.__getattr__("DB"),
-            port=int(env.__getattr__("DB_PORT")),
-            user=env.__getattr__("DB_USER"),
-            password=env.__getattr__("DB_PASSWORD"),
+            host=os.getenv("DB_HOST"),
+            db=os.getenv("DB"),
+            port=int(os.getenv("DB_PORT")),
+            user=os.getenv("DB_USER"),
+            password=os.getenv("DB_PASSWORD"),
             charset='utf8mb4',
             cursorclass=pymysql.cursors.DictCursor
         )

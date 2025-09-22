@@ -18,9 +18,9 @@ except ImportError:
 from PIL import Image
 
 from src.utils.custom_logging import get_logger
-from src.utils.env import Env
+from load_dotenv import load_dotenv
 
-env = Env()
+load_dotenv()
 log = get_logger(__name__)
 
 
@@ -33,7 +33,7 @@ class WebSocketEndpointClient:
         max_reconnect_attempts: int = 5,
         reconnect_delay: float = 1.0
     ):
-        self.base_url = base_url or env.TRITON_WS_URL
+        self.base_url = base_url or os.getenv("TRITON_WS_URL")
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
         self.max_reconnect_attempts = max_reconnect_attempts

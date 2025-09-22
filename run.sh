@@ -1,42 +1,44 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
 
-echo "--- Running FrameReader Backend ---"
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="$PROJECT_ROOT/.env"
+COMPOSE_FILE="$PROJECT_ROOT/docker/docker-compose.yml"
 
-IMAGE_NAME="framereader-backend:latest"
+echo "--- Running Stack ---"
 
-# Define environment variables (replace with your actual values or load from .env)
+if [[ -f "$ENV_FILE" ]]; then
+    while IFS='=' read -r key value; do
+        if [[ -n $key && $key != '#'* ]]; then
+            key=$(echo "$key" | tr -d '\r')
+            value=$(echo "$value" | tr -d '\r')
+            export "$key"="$value"
+        fi
+    done < "$ENV_FILE"
+else
+    echo "WARNING: .env file not found, using defaults"
+fi
 
-# Example:
-# DB_HOST="host.docker.internal" # Use this if running Docker on Linux/Windows and DB is on host
-# DB_HOST="localhost" # Use this if DB is running directly on the same host as Docker
-# DB_HOST="your_db_container_name" # Use this if DB is in another Docker container in the same network
-# DB_PORT="3306"
-# DB="your_database_name"
-# DB_USER="your_db_user"
-# DB_PASSWORD="your_db_password"
-# HOST="0.0.0.0"
-# SERVER_PORT="8000"
-# DEBUG="TRUE" # or "FALSE"
-# TRITON_API_URL="http://host.docker.internal:8000" # Or your Triton HTTP URL
-# TRITON_WS_URL="ws://host.docker.internal:8000"   # Or your Triton WebSocket URL
+cleanup() {
+    echo "--- Stopping Stack ---"
+    docker-compose -f "$COMPOSE_FILE" down --remove-orphans
+    echo "--- Stack Stopped ---"
+}
 
-# Example of how to pass environment variables (uncomment and set your values)
-# ENV_VARS="-e DB_HOST=localhost -e DB_PORT=3306 -e DB=framereader_db -e DB_USER=user -e DB_PASSWORD=password"
-# ENV_VARS+=" -e HOST=0.0.0.0 -e SERVER_PORT=8000 -e DEBUG=TRUE"
-# ENV_VARS+=" -e TRITON_API_URL=http://localhost:8000 -e TRITON_WS_URL=ws://localhost:8000"
+trap cleanup EXIT INT TERM
 
-# You might need to adjust the network and port mapping based on your setup.
-# -p 8000:8000 maps host port 8000 to container port 8000
-# --network host might be needed if you want the container to use the host's network stack
-# --add-host host.docker.internal:host-gateway is useful for Docker Desktop on Linux/Windows to access host services
+if ! command -v docker-compose &> /dev/null; then
+    echo "ERROR: docker-compose не установлен"
+    exit 1
+fi
 
-echo "Running Docker container for backend..."
-docker run --rm -it \
-  -p 8005:8005 \
-  --name framereader-backend-app \
-  $ENV_VARS \
-  $IMAGE_NAME
+if [[ ! -f "$COMPOSE_FILE" ]]; then
+    echo "ERROR: Файл docker-compose.yml не найден: $COMPOSE_FILE"
+    exit 1
+fi
+
+echo "Start up services..."
+docker-compose -f "$COMPOSE_FILE" up framereader-backend-app
 
 echo "--- Backend Container Stopped ---"

@@ -10,9 +10,9 @@ from PIL import Image
 import asyncio
 
 from src.utils.custom_logging import get_logger
-from src.utils.env import Env
+from load_dotenv import load_dotenv
 
-env = Env()
+load_dotenv()
 log = get_logger(__name__)
 
 
@@ -23,7 +23,7 @@ class MainEndpointClient:
         timeout: float = 300.0,
         max_retries: int = 3
     ):
-        self.base_url = base_url or env.TRITON_API_URL
+        self.base_url = base_url or os.getenv("TRITON_API_URL")
         self.timeout = timeout
         self.max_retries = max_retries
         self._client: Optional[httpx.AsyncClient] = None

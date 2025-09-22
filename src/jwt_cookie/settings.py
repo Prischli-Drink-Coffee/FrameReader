@@ -1,11 +1,12 @@
+import os
 from pydantic import BaseModel, Field, PrivateAttr
 from pydantic_settings import BaseSettings
 from typing import Optional, ClassVar
 from pathlib import Path
-from src.utils.env import Env
+from load_dotenv import load_dotenv
 
 
-env = Env()
+load_dotenv()
 
 
 class AuthJWT(BaseModel):
@@ -13,8 +14,8 @@ class AuthJWT(BaseModel):
     public_key_path: Optional[str] = None
     _private_key_content: str = PrivateAttr()
     _public_key_content: str = PrivateAttr()
-    access_token_expire_minutes: ClassVar[int] = int(env.__getattr__("ACCESS_TOKEN_EXPIRE_MINUTES"))
-    refresh_token_expire_days: ClassVar[int] = int(env.__getattr__("REFRESH_TOKEN_EXPIRE_DAYS"))
+    access_token_expire_minutes: ClassVar[int] = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
+    refresh_token_expire_days: ClassVar[int] = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS"))
 
     def __init__(self, **data):
         super().__init__(**data)

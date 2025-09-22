@@ -8,7 +8,6 @@ from fastapi.openapi.models import Tag as OpenApiTag
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from src.utils.custom_logging import get_logger
-from src.utils.env import Env
 from src import path_to_project
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -18,6 +17,7 @@ from pathlib import Path
 import asyncio
 import signal
 from contextlib import asynccontextmanager
+from load_dotenv import load_dotenv
 
 from src.database.models import (
     Users,
@@ -38,7 +38,7 @@ from src.scripts.video_downloader import VideoDownloader
 from src.scripts.tracker import VideoStreamTracker, FrameTrackingResult
 from src.scripts.recognizer import recognize_text_from_video
 
-env = Env()
+load_dotenv()
 log = get_logger(__name__)
 
 
@@ -131,8 +131,8 @@ app.add_middleware(
 )
 
 
-TRITON_HTTP_URL = env.__getattr__("TRITON_API_URL")
-TRITON_WS_URL = env.__getattr__("TRITON_WS_URL")
+TRITON_HTTP_URL = os.getenv("TRITON_API_URL")
+TRITON_WS_URL = os.getenv("TRITON_WS_URL")
 
 
 # PublicMainTag = OpenApiTag(name="Main", description="CRUD operations main")
@@ -227,6 +227,9 @@ class VideoProcessor:
         
         log.info(f"Processing video request for session {self.session_id}: {video_url}")
         log.info(f"Parameters: {params}")
+
+        if 'model_path' in params:
+            params['model_path'] = os.path.join(path_to_project(), params.get('model_path'))
         
         VideoProcessingManager.add_session(self.session_id)
         
@@ -1833,13 +1836,13 @@ def run_server():
     with open(uvicorn_log_config, 'r') as f:
         uvicorn_config = yaml.safe_load(f.read())
         logging.config.dictConfig(uvicorn_config)
-    if env.__getattr__("DEBUG") == "TRUE":
+    if os.getenv("DEBUG") == "TRUE":
         reload = True
-    elif env.__getattr__("DEBUG") == "FALSE":
+    elif os.getenv("DEBUG") == "FALSE":
         reload = False
     else:
         raise Exception("Not init debug mode in env file")
-    uvicorn.run("src.pipeline.server:app", host=env.__getattr__("HOST"), port=int(env.__getattr__("SERVER_PORT")),
+    uvicorn.run("src.pipeline.server:app", host=os.getenv("HOST"), port=int(os.getenv("SERVER_PORT")),
                 log_config=uvicorn_log_config, reload=reload)
 
 

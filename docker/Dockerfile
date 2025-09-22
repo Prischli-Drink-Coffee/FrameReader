@@ -1,4 +1,4 @@
-FROM python:3.9-slim-buster
+FROM python:3.12-slim-bullseye
 
 ENV PYTHONUNBUFFERED=1
 ENV APP_HOME=/app
@@ -7,20 +7,23 @@ WORKDIR $APP_HOME
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        default-mysql-client \
         build-essential \
-        libmysqlclient-dev \
         git \
         ffmpeg \
+        netcat \
     && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml poetry.lock* $APP_HOME/
+COPY pyproject.toml $APP_HOME/
 
-RUN pip install poetry
+RUN pip install uv
 
-RUN poetry install --no-dev --no-root
+RUN uv sync
+
+COPY db.sh /usr/local/bin/db.sh
+RUN chmod +x /usr/local/bin/db.sh
+
+COPY server.sh $APP_HOME/server.sh
+RUN chmod +x $APP_HOME/server.sh
 
 COPY . $APP_HOME
-
-EXPOSE 8005
-
-CMD ["poetry", "run", "uvicorn", "src.pipeline.server:app", "--host", "0.0.0.0", "--port", "8005"]

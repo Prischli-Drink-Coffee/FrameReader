@@ -1,0 +1,64 @@
+services:
+
+  framereader-backend-app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        APP_TAG: ${APP_TAG:-dev}
+    container_name: framereader-backend-app
+    ports:
+      - "${SERVER_PORT:-8010}:${SERVER_PORT:-8010}"
+    restart: on-failure:5
+    command: >
+      bash -c "bash db.sh && exec bash server.sh"
+    volumes:
+      - ../logs:/app/logs
+      - ../docs/last.engine:/app/docs/last.engine
+    env_file:
+      - ../.env
+    environment:
+      - SERVER_PORT=${SERVER_PORT:-8010}
+      - HOST=${HOST:-0.0.0.0}
+      - DB_HOST=mysql
+      - DB_PORT=${DB_PORT:-3306}
+      - DB=${DB:-FrameReader}
+      - DB_USER=${DB_USER:-god}
+      - DB_PASSWORD=${DB_PASSWORD:-god}
+      - DEBUG=${DEBUG:-false}
+      - TRITON_API_URL=${TRITON_API_URL:-http://localhost:8000}
+      - REFRESH_TOKEN_EXPIRE_DAYS=${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - SECRET_KEY=${SECRET_KEY:-supersecretkey}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - network
+
+  mysql:
+    image: mysql:8.0
+    container_name: framereader-mysql
+    restart: on-failure:5
+    env_file:
+      - ../.env
+    environment:
+      DB_PORT: ${DB_PORT:-3306}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-god}
+      MYSQL_DATABASE: ${DB:-FrameReader}
+      MYSQL_USER: ${DB_USER:-god}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-god}
+    ports:
+      - "3307:${DB_PORT:-3306}"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD:-god}"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 5s
+    networks:
+      - network
+
+networks:
+  network:
+    driver: bridge
